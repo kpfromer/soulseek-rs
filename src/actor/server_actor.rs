@@ -273,8 +273,8 @@ impl ServerActor {
         let socket_addr = socket_addrs.next();
 
         match socket_addr {
-            Some(addr) => {
-                if let Ok(stream) = TcpStream::connect(addr) {
+            Some(addr) => match TcpStream::connect(addr) {
+                Ok(stream) => {
                     if let Err(e) = stream.set_nonblocking(true) {
                         error!("[server] Failed to set non-blocking: {}", e);
                         self.disconnect_with_error(e);
@@ -288,32 +288,12 @@ impl ServerActor {
                         since: Instant::now(),
                     };
                     true
-                } else {
-                    match TcpStream::connect(addr) {
-                        Ok(stream) => {
-                            if let Err(e) = stream.set_nonblocking(true) {
-                                error!(
-                                    "[server] Failed to set non-blocking: {}",
-                                    e
-                                );
-                                self.disconnect_with_error(e);
-                                return false;
-                            }
-                            stream.set_nodelay(true).ok();
-                            self.stream = Some(stream);
-                            self.connection_state =
-                                ConnectionState::Connecting {
-                                    since: Instant::now(),
-                                };
-                            true
-                        }
-                        Err(e) => {
-                            self.disconnect_with_error(e);
-                            false
-                        }
-                    }
                 }
-            }
+                Err(e) => {
+                    self.disconnect_with_error(e);
+                    false
+                }
+            },
             None => {
                 let error_msg =
                     format!("No socket addresses found for {}:{}", host, port);
