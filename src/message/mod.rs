@@ -227,21 +227,6 @@ impl Message {
         val
     }
 
-    pub fn read_raw_byte(&mut self) -> Vec<u8> {
-        if self.pointer + 4 > self.data.len() {
-            return vec![];
-        }
-
-        let val = vec![
-            self.data[self.pointer],
-            self.data[self.pointer + 1],
-            self.data[self.pointer + 2],
-            self.data[self.pointer + 3],
-        ];
-        self.pointer += 4;
-        val
-    }
-
     pub fn read_int32(&mut self) -> u32 {
         if self.pointer + 4 > self.data.len() {
             return 0;
