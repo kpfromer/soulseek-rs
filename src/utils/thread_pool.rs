@@ -1,0 +1,134 @@
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
+use std::thread;
+
+type Job = Box<dyn FnOnce() + Send + 'static>;
+
+enum Message {
+    NewJob(Job),
+    Terminate,
+}
+
+pub struct ThreadPool {
+    workers: Vec<Worker>,
+    sender: Option<mpsc::Sender<Message>>,
+    active_threads: Arc<AtomicUsize>,
+}
+
+impl ThreadPool {
+    pub fn new(size: usize) -> ThreadPool {
+        assert!(size > 0);
+
+        let (sender, receiver) = mpsc::channel();
+        let receiver = Arc::new(Mutex::new(receiver));
+        let active_threads = Arc::new(AtomicUsize::new(0));
+        let mut workers = Vec::with_capacity(size);
+
+        for id in 0..size {
+            workers.push(Worker::new(
+                id,
+                Arc::clone(&receiver),
+                Arc::clone(&active_threads),
+                size,
+            ));
+        }
+
+        ThreadPool {
+            workers,
+            sender: Some(sender),
+            active_threads,
+        }
+    }
+
+    pub fn execute<F>(&self, f: F)
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        let job = Box::new(f);
+        if let Some(ref sender) = self.sender {
+            sender.send(Message::NewJob(job)).unwrap();
+        }
+    }
+
+    pub fn thread_count(&self) -> usize {
+        self.workers.len()
+    }
+
+    pub fn active_thread_count(&self) -> usize {
+        self.active_threads.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for ThreadPool {
+    fn drop(&mut self) {
+        // Send termination message to all workers
+        if let Some(sender) = self.sender.take() {
+            for _ in &self.workers {
+                sender.send(Message::Terminate).unwrap();
+            }
+        }
+
+        // Wait for all workers to finish
+        for worker in &mut self.workers {
+            if let Some(thread) = worker.thread.take() {
+                thread.join().unwrap();
+            }
+        }
+    }
+}
+
+struct Worker {
+    _id: usize,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl Worker {
+    fn new(
+        id: usize,
+        receiver: Arc<Mutex<mpsc::Receiver<Message>>>,
+        _active_threads: Arc<AtomicUsize>,
+        _total_threads: usize,
+    ) -> Worker {
+        let thread = thread::spawn(move || {
+            loop {
+                let message = receiver.lock().unwrap().recv();
+                match message {
+                    Ok(Message::NewJob(job)) => {
+                        // let active =
+                        //     active_threads.fetch_add(1, Ordering::SeqCst) + 1;
+                        // trace!(
+                        //     "Thread {} started job (active: {}/{})",
+                        //     id,
+                        //     active,
+                        //     total_threads
+                        // );
+
+                        job();
+
+                        // let active =
+                        // active_threads.fetch_sub(1, Ordering::SeqCst) - 1;
+                        // trace!(
+                        //     "Thread {} finished job (active: {}/{})",
+                        //     id,
+                        //     active,
+                        //     total_threads
+                        // );
+                    }
+                    Ok(Message::Terminate) => {
+                        // Received termination signal
+                        break;
+                    }
+                    Err(_) => {
+                        // Channel disconnected
+                        break;
+                    }
+                }
+            }
+        });
+
+        Worker {
+            _id: id,
+            thread: Some(thread),
+        }
+    }
+}
