@@ -1,18 +1,18 @@
 use crate::message::{Message, handlers::Handlers};
-use std::sync::mpsc::Sender;
+use tokio::sync::mpsc::UnboundedSender;
 
 use crate::warn;
 
 pub struct MessageDispatcher<Op> {
     owner_name: String,
-    sender: Sender<Op>,
+    sender: UnboundedSender<Op>,
     handlers: Handlers<Op>,
 }
 
 impl<Op> MessageDispatcher<Op> {
     pub fn new(
         owner_name: String,
-        sender: Sender<Op>,
+        sender: UnboundedSender<Op>,
         handlers: Handlers<Op>,
     ) -> Self {
         MessageDispatcher {

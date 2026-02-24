@@ -6,20 +6,21 @@ use crate::message::MessageReader;
 use crate::peer::Peer;
 
 use std::collections::HashMap;
-use std::net::TcpStream;
-use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
+
+use tokio::net::TcpStream;
+use tokio::sync::mpsc::UnboundedSender;
 
 pub struct PeerRegistry {
     peers: Arc<Mutex<HashMap<String, ActorHandle<PeerMessage>>>>,
     actor_system: Arc<ActorSystem>,
-    client_channel: Sender<ClientOperation>,
+    client_channel: UnboundedSender<ClientOperation>,
 }
 
 impl PeerRegistry {
     pub fn new(
         actor_system: Arc<ActorSystem>,
-        client_channel: Sender<ClientOperation>,
+        client_channel: UnboundedSender<ClientOperation>,
     ) -> Self {
         Self {
             peers: Arc::new(Mutex::new(HashMap::new())),
