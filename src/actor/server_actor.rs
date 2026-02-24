@@ -387,6 +387,8 @@ impl ServerActor {
             if logged_in.is_some() {
                 break;
             }
+
+            std::thread::sleep(Duration::from_millis(50));
         }
 
         if logged_in.unwrap() {
