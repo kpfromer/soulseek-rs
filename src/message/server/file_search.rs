@@ -1,5 +1,5 @@
 use crate::{debug, info};
-use std::sync::mpsc::Sender;
+use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{
     actor::server_actor::ServerMessage, message::Message,
@@ -12,7 +12,7 @@ impl MessageHandler<ServerMessage> for FileSearchHandler {
     fn get_code(&self) -> u32 {
         26
     }
-    fn handle(&self, message: &mut Message, _sender: Sender<ServerMessage>) {
+    fn handle(&self, message: &mut Message, _sender: UnboundedSender<ServerMessage>) {
         debug!("Handling file search message");
         let username = message.read_string();
         let token = message.read_int32();

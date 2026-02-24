@@ -11,13 +11,14 @@ use crate::peer::Peer;
 use crate::types::{Download, SearchResult, Transfer};
 use crate::{debug, error, trace, warn};
 
-use std::io::{self, Error, Write};
-use std::net::TcpStream;
-use std::sync::mpsc::{Receiver, Sender};
+use std::io;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
-#[derive(Debug, Clone)]
+use tokio::net::TcpStream;
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+
+#[derive(Debug)]
 pub enum PeerMessage {
     SendMessage(Message),
     FileSearchResult(SearchResult),
@@ -43,10 +44,10 @@ pub struct PeerActor {
     stream: Option<TcpStream>,
     connection_state: ConnectionState,
     reader: MessageReader,
-    client_channel: Sender<ClientOperation>,
+    client_channel: UnboundedSender<ClientOperation>,
     self_handle: Option<ActorHandle<PeerMessage>>,
     dispatcher: Option<MessageDispatcher<PeerMessage>>,
-    dispatcher_receiver: Option<Receiver<PeerMessage>>,
+    dispatcher_receiver: Option<UnboundedReceiver<PeerMessage>>,
     queued_messages: Vec<PeerMessage>,
 }
 
@@ -55,7 +56,7 @@ impl PeerActor {
         peer: Peer,
         stream: Option<TcpStream>,
         reader: Option<MessageReader>,
-        client_channel: Sender<ClientOperation>,
+        client_channel: UnboundedSender<ClientOperation>,
     ) -> Self {
         let connection_state = if stream.is_some() {
             ConnectionState::Connected
@@ -82,7 +83,7 @@ impl PeerActor {
 
     fn initialize_dispatcher(&mut self) {
         let (dispatcher_sender, dispatcher_receiver) =
-            std::sync::mpsc::channel::<PeerMessage>();
+            mpsc::unbounded_channel::<PeerMessage>();
 
         self.dispatcher_receiver = Some(dispatcher_receiver);
 
@@ -105,7 +106,7 @@ impl PeerActor {
     fn process_dispatcher_messages(&mut self) {
         let messages: Vec<PeerMessage> = self
             .dispatcher_receiver
-            .as_ref()
+            .as_mut()
             .map_or_else(Vec::new, |receiver| {
                 let mut msgs = Vec::new();
                 while let Ok(msg) = receiver.try_recv() {
@@ -114,9 +115,9 @@ impl PeerActor {
                 msgs
             });
 
-        messages
-            .iter()
-            .for_each(|msg| self.handle_message(msg.clone()));
+        for msg in messages {
+            self.handle_message(msg);
+        }
     }
 
     fn handle_message(&mut self, msg: PeerMessage) {
@@ -242,13 +243,20 @@ impl PeerActor {
         }
 
         {
-            let stream = match self.stream.as_mut() {
+            let stream = match self.stream.as_ref() {
                 Some(s) => s,
                 None => return,
             };
 
-            match self.reader.read_from_socket(stream) {
-                Ok(()) => {}
+            let mut temp_buffer = [0u8; 1024];
+            match stream.try_read(&mut temp_buffer) {
+                Ok(0) => {
+                    // Connection closed
+                    return;
+                }
+                Ok(n) => {
+                    self.reader.push_bytes(&temp_buffer[..n]);
+                }
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {}
                 Err(ref e) if e.kind() == io::ErrorKind::TimedOut => {
                     let peer_lock = self.peer.read().unwrap();
@@ -315,7 +323,7 @@ impl PeerActor {
     }
 
     fn send_message(&mut self, message: Message) {
-        let stream = match self.stream.as_mut() {
+        let stream = match self.stream.as_ref() {
             Some(s) => s,
             None => {
                 error!("Cannot send message: stream is None");
@@ -337,25 +345,34 @@ impl PeerActor {
                 .map_err(|e| e.to_string())
         );
 
-        if let Err(e) = stream.write_all(&message.get_buffer()) {
-            error!(
-                "[peer:{}] Error writing message: {}. Disconnecting.",
-                username, e
-            );
-            self.disconnect_with_error(e);
-            return;
-        }
-
-        if let Err(e) = stream.flush() {
-            error!(
-                "[peer:{}] Error flushing stream: {}. Disconnecting.",
-                username, e
-            );
-            self.disconnect_with_error(e);
+        let buf = message.get_buffer();
+        match stream.try_write(&buf) {
+            Ok(n) if n == buf.len() => {}
+            Ok(n) => {
+                error!(
+                    "[peer:{}] Partial write: {} of {} bytes",
+                    username,
+                    n,
+                    buf.len()
+                );
+            }
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                warn!(
+                    "[peer:{}] Write would block, message may be lost",
+                    username
+                );
+            }
+            Err(e) => {
+                error!(
+                    "[peer:{}] Error writing message: {}. Disconnecting.",
+                    username, e
+                );
+                self.disconnect_with_error(e);
+            }
         }
     }
 
-    fn disconnect_with_error(&mut self, error: Error) {
+    fn disconnect_with_error(&mut self, error: io::Error) {
         let username = self.peer.read().unwrap().username.clone();
         debug!("[peer:{}] disconnect", username);
 
@@ -393,24 +410,29 @@ impl PeerActor {
 
         match socket_addr {
             Ok(addr) => {
-                // Use connect_timeout to prevent blocking the thread for too long
+                // Use std TcpStream for synchronous connect with timeout, then convert to tokio
                 let timeout = Duration::from_secs(5);
-                match TcpStream::connect_timeout(&addr, timeout) {
-                    Ok(stream) => {
-                        if let Err(e) = stream.set_nonblocking(true) {
-                            error!(
-                                "[peer:{}] Failed to set non-blocking: {}",
-                                username, e
-                            );
-                            self.disconnect_with_error(e);
-                            return false;
+                match std::net::TcpStream::connect_timeout(&addr, timeout) {
+                    Ok(std_stream) => {
+                        std_stream.set_nonblocking(true).ok();
+                        std_stream.set_nodelay(true).ok();
+                        match TcpStream::from_std(std_stream) {
+                            Ok(stream) => {
+                                self.stream = Some(stream);
+                                self.connection_state = ConnectionState::Connecting {
+                                    since: Instant::now(),
+                                };
+                                true
+                            }
+                            Err(e) => {
+                                error!(
+                                    "[peer:{}] Failed to convert to tokio TcpStream: {}",
+                                    username, e
+                                );
+                                self.disconnect_with_error(e);
+                                false
+                            }
                         }
-                        stream.set_nodelay(true).ok();
-                        self.stream = Some(stream);
-                        self.connection_state = ConnectionState::Connecting {
-                            since: Instant::now(),
-                        };
-                        true
                     }
                     Err(e) => {
                         self.disconnect_with_error(e);
@@ -449,12 +471,23 @@ impl PeerActor {
             return;
         }
 
-        let Some(ref stream) = self.stream else {
+        if self.stream.is_none() {
             return;
-        };
+        }
 
-        match stream.peer_addr() {
-            Ok(_) => {
+        // Since std::net::TcpStream::connect_timeout() succeeded,
+        // the connection is established. Verify with try_read.
+        let stream = self.stream.as_ref().unwrap();
+        let mut buf = [0u8; 1];
+        match stream.try_read(&mut buf) {
+            Ok(n) => {
+                if n > 0 {
+                    self.reader.push_bytes(&buf[..n]);
+                }
+                self.connection_state = ConnectionState::Connected;
+                self.on_connection_established();
+            }
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                 self.connection_state = ConnectionState::Connected;
                 self.on_connection_established();
             }
@@ -471,18 +504,21 @@ impl PeerActor {
         let username = peer.username.clone();
         drop(peer);
 
-        let Some(ref mut stream) = self.stream else {
+        let Some(ref stream) = self.stream else {
             return;
         };
 
         let handshake_msg = MessageFactory::build_watch_user(&username);
-        if let Err(e) = stream.write_all(&handshake_msg.get_data()) {
-            error!(
-                "[peer:{}] Failed to send watch user handshake: {}",
-                username, e
-            );
-            self.disconnect_with_error(e);
-            return;
+        match stream.try_write(&handshake_msg.get_data()) {
+            Ok(_) => {}
+            Err(e) => {
+                error!(
+                    "[peer:{}] Failed to send watch user handshake: {}",
+                    username, e
+                );
+                self.disconnect_with_error(e);
+                return;
+            }
         }
 
         self.initialize_dispatcher();

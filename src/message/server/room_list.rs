@@ -2,7 +2,7 @@ use crate::{
     actor::server_actor::ServerMessage,
     message::{Message, MessageHandler},
 };
-use std::sync::mpsc::Sender;
+use tokio::sync::mpsc::UnboundedSender;
 
 pub struct RoomListHandler;
 
@@ -11,7 +11,7 @@ impl MessageHandler<ServerMessage> for RoomListHandler {
         64
     }
 
-    fn handle(&self, _message: &mut Message, _sender: Sender<ServerMessage>) {
+    fn handle(&self, _message: &mut Message, _sender: UnboundedSender<ServerMessage>) {
         // let num_public_rooms = message.read_int32();
         // for _ in 0..num_public_rooms {
         //     rooms.public_rooms.push(Room::new(message.read_string(), 0));

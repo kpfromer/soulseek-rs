@@ -1,5 +1,5 @@
 use crate::debug;
-use std::sync::mpsc::Sender;
+use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{
     actor::server_actor::ServerMessage,
@@ -14,7 +14,7 @@ impl MessageHandler<ServerMessage> for ParentSpeedRatioHandler {
         84
     }
 
-    fn handle(&self, message: &mut Message, _sender: Sender<ServerMessage>) {
+    fn handle(&self, message: &mut Message, _sender: UnboundedSender<ServerMessage>) {
         let number = message.read_int32();
         debug!("Parent speed ratio: {}", number);
     }

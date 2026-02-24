@@ -8,22 +8,19 @@ use crate::{
     error::{Result, SoulseekRs},
     peer::{ConnectionType, DownloadPeer, NewPeer, Peer, listen::Listen},
     types::{Download, Search, SearchResult},
-    utils::{md5, thread_pool::ThreadPool},
+    utils::md5,
 };
 use std::{
     collections::HashMap,
-    net::TcpStream,
     sync::{
         RwLock,
         atomic::{AtomicBool, Ordering},
-        mpsc::{Receiver, Sender},
     },
-    thread::{self, sleep},
 };
-use std::{
-    sync::{Arc, mpsc},
-    time::{Duration, Instant},
-};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use crate::{debug, error, info, trace, warn};
 const DEFALT_LISTEN_PORT: u32 = 2234;
@@ -83,12 +80,12 @@ pub enum ClientOperation {
         obfuscated_port: u16,
     },
     UploadFailed(String, String),
-    SetServerSender(Sender<ServerMessage>),
+    SetServerSender(UnboundedSender<ServerMessage>),
 }
 pub struct ClientContext {
     pub peer_registry: Option<PeerRegistry>,
-    sender: Option<Sender<ClientOperation>>,
-    server_sender: Option<Sender<ServerMessage>>,
+    sender: Option<UnboundedSender<ClientOperation>>,
+    server_sender: Option<UnboundedSender<ServerMessage>>,
     searches: HashMap<String, Search>,
     downloads: Vec<Download>,
     actor_system: Arc<ActorSystem>,
@@ -132,44 +129,11 @@ impl ClientContext {
         }
     }
 }
-#[test]
-fn test_client_context_downloads() {
-    let mut context = ClientContext::new();
-    let token = 123;
-    let new_token = 1234;
-    let download = Download {
-        username: "test".to_string(),
-        filename: "test.txt".to_string(),
-        token,
-        size: 100,
-        download_directory: "test".to_string(),
-        status: DownloadStatus::Queued,
-        sender: mpsc::channel().0,
-    };
-    context.add_download(download);
-    assert!(context.get_download_by_token(123).is_some());
-    assert_eq!(context.get_download_tokens(), vec![123]);
-    assert_eq!(context.get_downloads().len(), 1);
-    if let Some(download) = context.get_download_by_token_mut(token) {
-        assert_eq!(download.token, token);
-        download.token = new_token
-    }
-    assert!(context.get_download_by_token(new_token).is_some());
-    assert_eq!(context.get_download_tokens(), vec![new_token]);
-    context.remove_download(new_token);
-    assert_eq!(context.get_downloads().len(), 0);
-    assert!(context.get_download_by_token(1234).is_none());
-}
 
 impl ClientContext {
     #[must_use]
     pub fn new() -> Self {
-        let max_threads = thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(8);
-
-        let thread_pool = Arc::new(ThreadPool::new(max_threads));
-        let actor_system = Arc::new(ActorSystem::new(thread_pool.clone()));
+        let actor_system = Arc::new(ActorSystem::new());
 
         Self {
             peer_registry: None,
@@ -212,11 +176,8 @@ impl Client {
         }
     }
 
-    pub fn connect(&mut self) {
-        let (sender, message_reader): (
-            Sender<ClientOperation>,
-            Receiver<ClientOperation>,
-        ) = mpsc::channel();
+    pub async fn connect(&mut self) {
+        let (sender, message_reader) = mpsc::unbounded_channel::<ClientOperation>();
 
         let mut ctx = self.context.write().unwrap();
         ctx.sender = Some(sender.clone());
@@ -246,13 +207,13 @@ impl Client {
             let context = self.context.clone();
             let own_username = self.username.clone();
 
-            thread::spawn(move || {
+            tokio::spawn(async move {
                 Listen::start(
                     listen_port,
                     client_sender,
                     context,
                     own_username,
-                );
+                ).await;
             });
         }
 
@@ -263,17 +224,17 @@ impl Client {
         );
     }
 
-    pub fn login(&self) -> Result<bool> {
+    pub async fn login(&self) -> Result<bool> {
         info!("Logging in as {}", self.username);
         if let Some(handle) = &self.server_handle {
-            let (tx, rx) = std::sync::mpsc::channel();
+            let (tx, rx) = tokio::sync::oneshot::channel();
             let _ = handle.send(ServerMessage::Login {
                 username: self.username.clone(),
                 password: self.password.clone(),
                 response: tx,
             });
 
-            match rx.recv() {
+            match rx.await {
                 Ok(result) => result,
                 Err(_) => Err(SoulseekRs::Timeout),
             }
@@ -292,15 +253,15 @@ impl Client {
         }
     }
 
-    pub fn search(
+    pub async fn search(
         &self,
         query: &str,
         timeout: Duration,
     ) -> Result<Vec<SearchResult>> {
-        self.search_with_cancel(query, timeout, None)
+        self.search_with_cancel(query, timeout, None).await
     }
 
-    pub fn search_with_cancel(
+    pub async fn search_with_cancel(
         &self,
         query: &str,
         timeout: Duration,
@@ -331,7 +292,7 @@ impl Client {
 
         let start = Instant::now();
         loop {
-            sleep(Duration::from_millis(100));
+            tokio::time::sleep(Duration::from_millis(100)).await;
 
             // Check if cancelled
             if let Some(ref flag) = cancel_flag
@@ -394,16 +355,14 @@ impl Client {
         username: String,
         size: u64,
         download_directory: String,
-    ) -> Result<(Download, Receiver<DownloadStatus>)> {
+    ) -> Result<(Download, UnboundedReceiver<DownloadStatus>)> {
         info!("[client] Downloading {} from {}", filename, username);
 
         let hash = md5::md5(&filename);
         let token = u32::from_str_radix(&hash[0..5], 16)?;
 
-        let (download_sender, download_receiver): (
-            Sender<DownloadStatus>,
-            Receiver<DownloadStatus>,
-        ) = mpsc::channel();
+        let (download_sender, download_receiver) =
+            mpsc::unbounded_channel::<DownloadStatus>();
 
         let download = Download {
             username: username.clone(),
@@ -468,21 +427,21 @@ impl Client {
     }
 
     fn listen_to_client_operations(
-        reader: Receiver<ClientOperation>,
+        mut reader: UnboundedReceiver<ClientOperation>,
         client_context: Arc<RwLock<ClientContext>>,
         own_username: String,
     ) {
-        thread::spawn(move || {
+        tokio::spawn(async move {
             loop {
-                match reader.recv() {
-                    Ok(operation) => {
+                match reader.recv().await {
+                    Some(operation) => {
                         match operation {
                             ClientOperation::ConnectToPeer(peer) => {
                                 let client_context_clone =
                                     client_context.clone();
                                 let own_username_clone = own_username.clone();
 
-                                thread::spawn(move || {
+                                tokio::spawn(async move {
                                     Self::connect_to_peer(
                                         peer,
                                         client_context_clone,
@@ -561,7 +520,7 @@ impl Client {
                                 );
                                 match maybe_download {
                                     Some(download) => {
-                                        thread::spawn(move || {
+                                        tokio::task::spawn_blocking(move || {
                                             let download_peer =
                                                 DownloadPeer::new(
                                                     download.username.clone(),
@@ -700,23 +659,7 @@ impl Client {
                                     .map(|r| r.contains(&username))
                                     .unwrap_or(false);
 
-                                if peer_exists {
-                                    // don't know if i should update? and or reconnect the peer
-                                    // debug!(
-                                    //     "existing peer: {:?}, new peer details:
-                                    //     username: {},
-                                    //     host: {},
-                                    //     port: {}
-                                    //     obfuscation_type: {}
-                                    //     obfuscated_port: {}",
-                                    //     peer,
-                                    //     username,
-                                    //     host,
-                                    //     port,
-                                    //     obfuscation_type,
-                                    //     obfuscated_port,
-                                    // );
-                                } else {
+                                if !peer_exists {
                                     let peer = Peer::new(
                                         username,
                                         ConnectionType::P,
@@ -732,7 +675,7 @@ impl Client {
                                     let own_username_clone =
                                         own_username.clone();
 
-                                    thread::spawn(move || {
+                                    tokio::spawn(async move {
                                         Self::connect_to_peer(
                                             peer,
                                             client_context_clone,
@@ -800,8 +743,8 @@ impl Client {
                             }
                         }
                     }
-                    Err(e) => {
-                        error!("[client] Channel recv error: {:?}", e);
+                    None => {
+                        error!("[client] Channel closed");
                         break;
                     }
                 }
@@ -813,7 +756,7 @@ impl Client {
         peer: Peer,
         client_context: Arc<RwLock<ClientContext>>,
         own_username: String,
-        stream: Option<TcpStream>,
+        stream: Option<std::net::TcpStream>,
     ) {
         let client_context = client_context.clone();
 
@@ -826,9 +769,15 @@ impl Client {
             ConnectionType::P => {
                 let username = peer.username.clone();
 
+                // Convert std TcpStream to tokio if provided
+                let tokio_stream = stream.and_then(|s| {
+                    s.set_nonblocking(true).ok();
+                    tokio::net::TcpStream::from_std(s).ok()
+                });
+
                 let context = client_context.read().unwrap();
                 if let Some(ref registry) = context.peer_registry {
-                    match registry.register_peer(peer_clone, stream, None) {
+                    match registry.register_peer(peer_clone, tokio_stream, None) {
                         Ok(_) => (),
                         Err(e) => {
                             trace!(
@@ -859,7 +808,7 @@ impl Client {
                 match download_peer.download_file(
                     client_context.clone(),
                     None,
-                    None,
+                    stream,
                 ) {
                     Ok((download, filename)) => {
                         trace!(
@@ -910,5 +859,39 @@ impl Client {
 
         drop(context);
         Self::connect_to_peer(peer, client_context, own_username, None);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_client_context_downloads() {
+        let mut context = ClientContext::new();
+        let token = 123;
+        let new_token = 1234;
+        let download = Download {
+            username: "test".to_string(),
+            filename: "test.txt".to_string(),
+            token,
+            size: 100,
+            download_directory: "test".to_string(),
+            status: DownloadStatus::Queued,
+            sender: mpsc::unbounded_channel().0,
+        };
+        context.add_download(download);
+        assert!(context.get_download_by_token(123).is_some());
+        assert_eq!(context.get_download_tokens(), vec![123]);
+        assert_eq!(context.get_downloads().len(), 1);
+        if let Some(download) = context.get_download_by_token_mut(token) {
+            assert_eq!(download.token, token);
+            download.token = new_token
+        }
+        assert!(context.get_download_by_token(new_token).is_some());
+        assert_eq!(context.get_download_tokens(), vec![new_token]);
+        context.remove_download(new_token);
+        assert_eq!(context.get_downloads().len(), 0);
+        assert!(context.get_download_by_token(1234).is_none());
     }
 }
