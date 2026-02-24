@@ -76,10 +76,10 @@ impl MessageFactory {
             // .write_int32(port) // should be different port
             .clone()
     }
-    pub fn build_watch_user(token: u32) -> Message {
+    pub fn build_watch_user(username: &str) -> Message {
         Message::new()
-            .write_raw_bytes([5, 0, 0, 0, 0].to_vec())
-            .write_int32(token)
+            .write_int32(5)
+            .write_string(username)
             .clone()
     }
 
@@ -133,9 +133,9 @@ impl MessageFactory {
 
 #[test]
 fn test_build_watch_user() {
-    let token: u32 = 223;
-    let message = MessageFactory::build_watch_user(token);
-    let expect: Vec<u8> = [5, 0, 0, 0, 0, 223, 0, 0, 0].to_vec();
+    let message = MessageFactory::build_watch_user("bob");
+    // code(5u32) + string_len(3u32) + "bob"
+    let expect: Vec<u8> = [5, 0, 0, 0, 3, 0, 0, 0, b'b', b'o', b'b'].to_vec();
 
     assert_eq!(expect, message.get_data())
 }

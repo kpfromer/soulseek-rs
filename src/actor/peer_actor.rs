@@ -469,23 +469,20 @@ impl PeerActor {
     fn on_connection_established(&mut self) {
         let peer = self.peer.read().unwrap();
         let username = peer.username.clone();
-        let token = peer.token;
         drop(peer);
 
         let Some(ref mut stream) = self.stream else {
             return;
         };
 
-        if let Some(token) = token {
-            let handshake_msg = MessageFactory::build_watch_user(token);
-            if let Err(e) = stream.write_all(&handshake_msg.get_data()) {
-                error!(
-                    "[peer:{}] Failed to send watch user handshake: {}",
-                    username, e
-                );
-                self.disconnect_with_error(e);
-                return;
-            }
+        let handshake_msg = MessageFactory::build_watch_user(&username);
+        if let Err(e) = stream.write_all(&handshake_msg.get_data()) {
+            error!(
+                "[peer:{}] Failed to send watch user handshake: {}",
+                username, e
+            );
+            self.disconnect_with_error(e);
+            return;
         }
 
         self.initialize_dispatcher();
