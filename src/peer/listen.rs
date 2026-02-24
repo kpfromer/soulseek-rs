@@ -78,11 +78,12 @@ fn parse_peer_init_message(mut message: Message) -> Option<PeerInitData> {
 
 fn parse_token_from_buffer(buffer: &[u8], username: &str) -> Option<u32> {
     let token_bytes = buffer.get(0..4)?;
-    let token = u32::from_le_bytes(
-        token_bytes
-            .try_into()
-            .unwrap_or_else(|_| panic!("[listener:{}] slice with incorrect length, can't extract transfer_token", username)),
-    );
+    let token = u32::from_le_bytes(token_bytes.try_into().unwrap_or_else(|_| {
+        panic!(
+            "[listener:{}] slice with incorrect length, can't extract transfer_token",
+            username
+        )
+    }));
     Some(token)
 }
 
@@ -172,21 +173,14 @@ fn handle_file_connection(
         context.own_username.clone(),
     );
 
-    match download_peer.download_file(
-        context.client_context.clone(),
-        download,
-        Some(stream),
-    ) {
+    match download_peer.download_file(context.client_context.clone(), download, Some(stream)) {
         Ok((download, filename)) => {
             let _ = download.sender.send(DownloadStatus::Completed);
             context
                 .client_context
                 .write()
                 .unwrap()
-                .update_download_with_status(
-                    download.token,
-                    DownloadStatus::Completed,
-                );
+                .update_download_with_status(download.token, DownloadStatus::Completed);
             info!(
                 "Successfully downloaded {} bytes to {}",
                 download.size, filename
@@ -212,11 +206,8 @@ async fn handle_incoming_connection(stream: TcpStream, context: ConnectionContex
     let mut stream = stream;
     let mut reader = MessageReader::new();
 
-    let Ok(mut message) = read_peer_init_message(&mut stream, &mut reader).await
-    else {
-        error!(
-            "[listener:{peer_ip}:{peer_port}] Failed to read peer init message"
-        );
+    let Ok(mut message) = read_peer_init_message(&mut stream, &mut reader).await else {
+        error!("[listener:{peer_ip}:{peer_port}] Failed to read peer init message");
         return;
     };
 
@@ -275,10 +266,7 @@ async fn handle_incoming_connection(stream: TcpStream, context: ConnectionContex
                         .client_context
                         .write()
                         .unwrap()
-                        .update_download_with_status(
-                            download.token,
-                            DownloadStatus::Completed,
-                        );
+                        .update_download_with_status(download.token, DownloadStatus::Completed);
                     info!(
                         "Successfully downloaded {} bytes to {}",
                         download.size, filename
@@ -296,9 +284,7 @@ async fn handle_incoming_connection(stream: TcpStream, context: ConnectionContex
     }
 
     let Some(init_data) = parse_peer_init_message(message) else {
-        error!(
-            "[listener:{peer_ip}:{peer_port}] Invalid or unknown peer init message"
-        );
+        error!("[listener:{peer_ip}:{peer_port}] Invalid or unknown peer init message");
         return;
     };
 
@@ -319,9 +305,9 @@ async fn handle_incoming_connection(stream: TcpStream, context: ConnectionContex
     );
 
     match init_data.connection_type {
-        ConnectionType::P => handle_peer_connection(
-            peer, stream, reader, &context, &peer_ip, peer_port,
-        ),
+        ConnectionType::P => {
+            handle_peer_connection(peer, stream, reader, &context, &peer_ip, peer_port)
+        }
 
         ConnectionType::F => {
             // Convert tokio TcpStream to std for blocking download
@@ -349,7 +335,13 @@ async fn handle_incoming_connection(stream: TcpStream, context: ConnectionContex
     }
 }
 
-pub struct Listen {}
+#[derive(thiserror::Error, Debug)]
+pub enum ListenError {
+    #[error("failed to bind listener to port {0}")]
+    FailedToBindListener(#[from] io::Error),
+}
+
+pub struct Listen;
 
 impl Listen {
     pub async fn start(
@@ -357,12 +349,12 @@ impl Listen {
         client_sender: UnboundedSender<ClientOperation>,
         client_context: Arc<RwLock<ClientContext>>,
         own_username: String,
-    ) {
+    ) -> Result<(), ListenError> {
         info!("[listener] starting listener on port {port}");
 
         let listener = TcpListener::bind(format!("0.0.0.0:{port}"))
             .await
-            .expect("Failed to bind listener to port");
+            .map_err(ListenError::FailedToBindListener)?;
 
         let context = ConnectionContext {
             client_sender,
@@ -379,10 +371,7 @@ impl Listen {
                     });
                 }
                 Err(e) => {
-                    error!(
-                        "[listener] Failed to accept connection: {}",
-                        e
-                    );
+                    error!("[listener] Failed to accept connection: {}", e);
                 }
             }
         }

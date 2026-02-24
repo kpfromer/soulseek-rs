@@ -450,8 +450,28 @@ impl ServerActor {
                     self.client_channel.send(op).unwrap();
                 }
             }
-            ServerMessage::LoginStatus(message) => {
-                self.context.write().unwrap().logged_in = Some(message);
+            ServerMessage::LoginStatus(logged_in) => {
+                self.context.write().unwrap().logged_in = Some(logged_in);
+
+                if logged_in {
+                    // Post-login setup: tell the server about ourselves
+                    self.queue_message(
+                        MessageFactory::build_shared_folders_message(1, 499),
+                    );
+                    self.queue_message(
+                        MessageFactory::build_no_parent_message(),
+                    );
+                    self.queue_message(
+                        MessageFactory::build_set_status_message(2),
+                    );
+                    if self.enable_listen {
+                        self.queue_message(
+                            MessageFactory::build_set_wait_port_message(
+                                self.listen_port,
+                            ),
+                        );
+                    }
+                }
             }
             ServerMessage::PierceFirewall(token) => {
                 self.send_message(

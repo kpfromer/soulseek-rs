@@ -37,6 +37,8 @@ pub enum PeerMessage {
     QueueUpload(String),
     RequestTransfer(Download),
     ProcessRead,
+    ConnectionEstablished(TcpStream),
+    ConnectionFailed(io::Error),
 }
 
 pub struct PeerActor {
@@ -49,6 +51,9 @@ pub struct PeerActor {
     dispatcher: Option<MessageDispatcher<PeerMessage>>,
     dispatcher_receiver: Option<UnboundedReceiver<PeerMessage>>,
     queued_messages: Vec<PeerMessage>,
+    #[allow(dead_code)]
+    own_username: String,
+    needs_handshake: bool,
 }
 
 impl PeerActor {
@@ -57,7 +62,9 @@ impl PeerActor {
         stream: Option<TcpStream>,
         reader: Option<MessageReader>,
         client_channel: UnboundedSender<ClientOperation>,
+        own_username: String,
     ) -> Self {
+        let needs_handshake = stream.is_none();
         let connection_state = if stream.is_some() {
             ConnectionState::Connected
         } else {
@@ -74,6 +81,8 @@ impl PeerActor {
             dispatcher: None,
             dispatcher_receiver: None,
             queued_messages: Vec::new(),
+            own_username,
+            needs_handshake,
         }
     }
 
@@ -123,7 +132,10 @@ impl PeerActor {
     fn handle_message(&mut self, msg: PeerMessage) {
         if matches!(self.connection_state, ConnectionState::Connecting { .. }) {
             match &msg {
-                PeerMessage::SetUsername(_) | PeerMessage::ProcessRead => {}
+                PeerMessage::SetUsername(_)
+                | PeerMessage::ProcessRead
+                | PeerMessage::ConnectionEstablished(_)
+                | PeerMessage::ConnectionFailed(_) => {}
                 _ => {
                     self.queued_messages.push(msg);
                     return;
@@ -228,6 +240,14 @@ impl PeerActor {
             }
             PeerMessage::ProcessRead => {
                 self.process_read();
+            }
+            PeerMessage::ConnectionEstablished(stream) => {
+                self.stream = Some(stream);
+                self.connection_state = ConnectionState::Connected;
+                self.on_connection_established();
+            }
+            PeerMessage::ConnectionFailed(e) => {
+                self.disconnect_with_error(e);
             }
             PeerMessage::UploadFailed(username, filename) => {
                 self.client_channel
@@ -410,35 +430,45 @@ impl PeerActor {
 
         match socket_addr {
             Ok(addr) => {
-                // Use std TcpStream for synchronous connect with timeout, then convert to tokio
-                let timeout = Duration::from_secs(5);
-                match std::net::TcpStream::connect_timeout(&addr, timeout) {
-                    Ok(std_stream) => {
-                        std_stream.set_nonblocking(true).ok();
-                        std_stream.set_nodelay(true).ok();
-                        match TcpStream::from_std(std_stream) {
-                            Ok(stream) => {
-                                self.stream = Some(stream);
-                                self.connection_state = ConnectionState::Connecting {
-                                    since: Instant::now(),
-                                };
-                                true
-                            }
-                            Err(e) => {
-                                error!(
-                                    "[peer:{}] Failed to convert to tokio TcpStream: {}",
-                                    username, e
+                self.connection_state = ConnectionState::Connecting {
+                    since: Instant::now(),
+                };
+
+                // Spawn async connect so we don't block the tokio runtime
+                let handle = self.self_handle.clone();
+                tokio::spawn(async move {
+                    let timeout = Duration::from_secs(5);
+                    let result = tokio::time::timeout(
+                        timeout,
+                        TcpStream::connect(addr),
+                    )
+                    .await;
+
+                    if let Some(ref handle) = handle {
+                        match result {
+                            Ok(Ok(stream)) => {
+                                stream.set_nodelay(true).ok();
+                                let _ = handle.send(
+                                    PeerMessage::ConnectionEstablished(stream),
                                 );
-                                self.disconnect_with_error(e);
-                                false
+                            }
+                            Ok(Err(e)) => {
+                                let _ = handle
+                                    .send(PeerMessage::ConnectionFailed(e));
+                            }
+                            Err(_) => {
+                                let _ =
+                                    handle.send(PeerMessage::ConnectionFailed(
+                                        io::Error::new(
+                                            io::ErrorKind::TimedOut,
+                                            "connection timed out",
+                                        ),
+                                    ));
                             }
                         }
                     }
-                    Err(e) => {
-                        self.disconnect_with_error(e);
-                        false
-                    }
-                }
+                });
+                true
             }
             Err(e) => {
                 error!(
@@ -460,64 +490,47 @@ impl PeerActor {
             return;
         };
 
-        let username = self.peer.read().unwrap().username.clone();
-
-        if since.elapsed() > Duration::from_secs(20) {
-            error!("[peer:{}] Connection timeout after 20 seconds", username);
+        // Safety timeout in case the async connect task never responds
+        if since.elapsed() > Duration::from_secs(10) {
+            let username = self.peer.read().unwrap().username.clone();
+            error!("[peer:{}] Connection timeout after 10 seconds", username);
             self.disconnect_with_error(io::Error::new(
                 io::ErrorKind::TimedOut,
                 "Connection timeout",
             ));
-            return;
-        }
-
-        if self.stream.is_none() {
-            return;
-        }
-
-        // Since std::net::TcpStream::connect_timeout() succeeded,
-        // the connection is established. Verify with try_read.
-        let stream = self.stream.as_ref().unwrap();
-        let mut buf = [0u8; 1];
-        match stream.try_read(&mut buf) {
-            Ok(n) => {
-                if n > 0 {
-                    self.reader.push_bytes(&buf[..n]);
-                }
-                self.connection_state = ConnectionState::Connected;
-                self.on_connection_established();
-            }
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                self.connection_state = ConnectionState::Connected;
-                self.on_connection_established();
-            }
-            Err(ref e) if e.kind() == io::ErrorKind::NotConnected => {}
-            Err(e) => {
-                error!("[peer:{}] Connection failed: {}", username, e);
-                self.disconnect_with_error(e);
-            }
         }
     }
 
     fn on_connection_established(&mut self) {
         let peer = self.peer.read().unwrap();
         let username = peer.username.clone();
+        let token = peer.token.unwrap_or(0);
         drop(peer);
 
         let Some(ref stream) = self.stream else {
             return;
         };
 
-        let handshake_msg = MessageFactory::build_watch_user(&username);
-        match stream.try_write(&handshake_msg.get_data()) {
-            Ok(_) => {}
-            Err(e) => {
-                error!(
-                    "[peer:{}] Failed to send watch user handshake: {}",
-                    username, e
-                );
-                self.disconnect_with_error(e);
-                return;
+        // For outbound connections (ConnectToPeer), send PierceFireWall
+        // so the remote peer can match this connection to the original request.
+        if self.needs_handshake {
+            let handshake_msg =
+                MessageFactory::build_pierce_firewall_message(token);
+            match stream.try_write(&handshake_msg.get_buffer()) {
+                Ok(_) => {
+                    debug!(
+                        "[peer:{}] Sent PierceFireWall handshake (token={})",
+                        username, token
+                    );
+                }
+                Err(e) => {
+                    error!(
+                        "[peer:{}] Failed to send PierceFireWall handshake: {}",
+                        username, e
+                    );
+                    self.disconnect_with_error(e);
+                    return;
+                }
             }
         }
 

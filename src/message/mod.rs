@@ -188,6 +188,10 @@ impl Message {
     }
 
     pub fn read_string(&mut self) -> String {
+        if self.pointer + 4 > self.data.len() {
+            return String::new();
+        }
+
         let size = u32::from_le_bytes([
             self.data[self.pointer],
             self.data[self.pointer + 1],
@@ -196,6 +200,12 @@ impl Message {
         ]) as usize;
 
         self.pointer += 4;
+
+        if self.pointer + size > self.data.len() {
+            self.pointer = self.data.len();
+            return String::new();
+        }
+
         let data = &self.data[self.pointer..self.pointer + size];
         self.pointer += size;
 
@@ -206,6 +216,9 @@ impl Message {
     }
 
     pub fn read_int8(&mut self) -> u8 {
+        if self.pointer >= self.data.len() {
+            return 0;
+        }
         let val = self.data[self.pointer];
         self.pointer += 1;
         val
@@ -213,6 +226,9 @@ impl Message {
 
     #[allow(dead_code)]
     pub fn read_int64(&mut self) -> u64 {
+        if self.pointer + 8 > self.data.len() {
+            return 0;
+        }
         let val = u64::from_le_bytes([
             self.data[self.pointer],
             self.data[self.pointer + 1],
@@ -243,6 +259,9 @@ impl Message {
     }
 
     pub fn read_bool(&mut self) -> bool {
+        if self.pointer >= self.data.len() {
+            return false;
+        }
         let val = self.data[self.pointer] == 1;
         self.pointer += 1;
         val

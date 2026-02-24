@@ -15,17 +15,20 @@ pub struct PeerRegistry {
     peers: Arc<Mutex<HashMap<String, ActorHandle<PeerMessage>>>>,
     actor_system: Arc<ActorSystem>,
     client_channel: UnboundedSender<ClientOperation>,
+    own_username: String,
 }
 
 impl PeerRegistry {
     pub fn new(
         actor_system: Arc<ActorSystem>,
         client_channel: UnboundedSender<ClientOperation>,
+        own_username: String,
     ) -> Self {
         Self {
             peers: Arc::new(Mutex::new(HashMap::new())),
             actor_system,
             client_channel,
+            own_username,
         }
     }
 
@@ -37,8 +40,13 @@ impl PeerRegistry {
     ) -> Result<ActorHandle<PeerMessage>, String> {
         let username = peer.username.clone();
 
-        let actor =
-            PeerActor::new(peer, stream, reader, self.client_channel.clone());
+        let actor = PeerActor::new(
+            peer,
+            stream,
+            reader,
+            self.client_channel.clone(),
+            self.own_username.clone(),
+        );
 
         let handle =
             self.actor_system.spawn_with_handle(actor, |actor, handle| {
@@ -112,6 +120,7 @@ impl Clone for PeerRegistry {
             peers: self.peers.clone(),
             actor_system: self.actor_system.clone(),
             client_channel: self.client_channel.clone(),
+            own_username: self.own_username.clone(),
         }
     }
 }

@@ -1,0 +1,103 @@
+use soulseek_rs::{Client, DownloadStatus};
+use std::io::{self, Write};
+use std::time::Duration;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Prompt for credentials
+    print!("Username: ");
+    io::stdout().flush()?;
+    let mut username = String::new();
+    io::stdin().read_line(&mut username)?;
+
+    print!("Password: ");
+    io::stdout().flush()?;
+    let mut password = String::new();
+    io::stdin().read_line(&mut password)?;
+
+    // Connect and login
+    let mut client = Client::new(username.trim(), password.trim());
+    client.connect().await;
+    let logged_in = client.login().await?;
+    if !logged_in {
+        eprintln!("Login failed.");
+        return Ok(());
+    }
+    println!("Logged in!\n");
+
+    // Search
+    print!("Search: ");
+    io::stdout().flush()?;
+    let mut query = String::new();
+    io::stdin().read_line(&mut query)?;
+
+    println!("Searching (10s)...");
+    let results = client.search(query.trim(), Duration::from_secs(10)).await?;
+
+    // Flatten all files with their source info
+    let files: Vec<_> = results
+        .iter()
+        .flat_map(|r| r.files.iter().map(move |f| (f, r.speed)))
+        .collect();
+
+    if files.is_empty() {
+        println!("No results.");
+        return Ok(());
+    }
+
+    // Display results (max 20)
+    let display_count = files.len().min(20);
+    for (i, (file, speed)) in files.iter().take(display_count).enumerate() {
+        let size_mb = file.size as f64 / 1_048_576.0;
+        let name = file.name.rsplit('\\').next().unwrap_or(&file.name);
+        println!("[{i}] {name} ({size_mb:.1} MB, {speed} KB/s) - {}", file.username);
+    }
+
+    // Pick a file
+    print!("\nSelect [0-{}]: ", display_count - 1);
+    io::stdout().flush()?;
+    let mut choice = String::new();
+    io::stdin().read_line(&mut choice)?;
+    let idx: usize = choice.trim().parse()?;
+    let (file, _) = &files[idx];
+
+    // Download
+    let (_dl, mut rx) = client.download(
+        file.name.clone(),
+        file.username.clone(),
+        file.size,
+        "./downloads".to_string(),
+    )?;
+
+    println!("Downloading...");
+    while let Some(status) = rx.recv().await {
+        match status {
+            DownloadStatus::Queued => println!("Queued..."),
+            DownloadStatus::InProgress {
+                bytes_downloaded,
+                total_bytes,
+                speed_bytes_per_sec,
+            } => {
+                let pct = bytes_downloaded as f64 / total_bytes as f64 * 100.0;
+                let speed_kb = speed_bytes_per_sec / 1024.0;
+                print!("\r{pct:5.1}% ({speed_kb:.0} KB/s)");
+                io::stdout().flush()?;
+            }
+            DownloadStatus::Completed => {
+                println!("\nDone!");
+                break;
+            }
+            DownloadStatus::Failed => {
+                eprintln!("\nDownload failed.");
+                break;
+            }
+            DownloadStatus::TimedOut => {
+                eprintln!("\nDownload timed out.");
+                break;
+            }
+        }
+    }
+
+    client.shutdown();
+    Ok(())
+}
