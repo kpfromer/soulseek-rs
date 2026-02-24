@@ -295,6 +295,12 @@ impl DownloadPeer {
                         );
                         download = Some(new_download);
                         processor.received = true;
+
+                        // Process any remaining bytes after the 4-byte token as file data
+                        if data.len() > 4 {
+                            processor.process_data_chunk(&data[4..]);
+                            chunk_counter += 1;
+                        }
                         continue;
                     }
 

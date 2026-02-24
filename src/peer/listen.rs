@@ -12,6 +12,7 @@ use crate::types::Download;
 use crate::{DownloadStatus, debug, error, info, trace};
 
 const PEER_INIT_MESSAGE_CODE: u8 = 1;
+const PIERCE_FIREWALL_MESSAGE_CODE: u8 = 0;
 
 #[derive(Clone)]
 struct ConnectionContext {
@@ -38,6 +39,17 @@ fn read_peer_init_message(
             return Ok(msg);
         }
     }
+}
+
+fn parse_pierce_firewall_token(message: &mut Message) -> Option<u32> {
+    message.set_pointer(4);
+    let message_code = message.read_int8();
+
+    if message_code != PIERCE_FIREWALL_MESSAGE_CODE {
+        return None;
+    }
+
+    Some(message.read_int32())
 }
 
 fn parse_peer_init_message(mut message: Message) -> Option<PeerInitData> {
@@ -191,12 +203,85 @@ fn handle_incoming_connection(stream: TcpStream, context: ConnectionContext) {
     let mut stream = stream;
     let mut reader = MessageReader::new();
 
-    let Ok(message) = read_peer_init_message(&mut stream, &mut reader) else {
+    let Ok(mut message) = read_peer_init_message(&mut stream, &mut reader)
+    else {
         error!(
             "[listener:{peer_ip}:{peer_port}] Failed to read peer init message"
         );
         return;
     };
+
+    // Check for PierceFireWall message (code 0)
+    if let Some(token) = parse_pierce_firewall_token(&mut message) {
+        debug!(
+            "[listener:{peer_ip}:{peer_port}] PierceFireWall token: {}",
+            token
+        );
+
+        let download = {
+            let client_context = context.client_context.read().unwrap();
+            client_context.get_download_by_token(token).cloned()
+        };
+
+        if download.is_none() {
+            debug!(
+                "[listener:{peer_ip}:{peer_port}] No download found for PierceFireWall token: {}",
+                token
+            );
+            return;
+        }
+
+        let peer = Peer::new(
+            format!("{}:pierce", peer_ip),
+            ConnectionType::F,
+            peer_ip.clone(),
+            peer_port.into(),
+            None,
+            0,
+            0,
+            0,
+        );
+
+        thread::spawn(move || {
+            let download_peer = DownloadPeer::new(
+                peer.username.clone(),
+                peer.host.clone(),
+                peer.port,
+                token,
+                true,
+                context.own_username.clone(),
+            );
+
+            match download_peer.download_file(
+                context.client_context.clone(),
+                download,
+                Some(stream),
+            ) {
+                Ok((download, filename)) => {
+                    let _ = download.sender.send(DownloadStatus::Completed);
+                    context
+                        .client_context
+                        .write()
+                        .unwrap()
+                        .update_download_with_status(
+                            download.token,
+                            DownloadStatus::Completed,
+                        );
+                    info!(
+                        "Successfully downloaded {} bytes to {}",
+                        download.size, filename
+                    );
+                }
+                Err(e) => {
+                    error!(
+                        "Failed to download file via PierceFireWall (token: {}) - Error: {}",
+                        token, e
+                    );
+                }
+            }
+        });
+        return;
+    }
 
     let Some(init_data) = parse_peer_init_message(message) else {
         error!(
@@ -206,13 +291,12 @@ fn handle_incoming_connection(stream: TcpStream, context: ConnectionContext) {
     };
 
     debug!(
-        "[listener:{peer_ip}:{peer_port}] peerInit (0)  username: {} connection_type: {} token: {}",
+        "[listener:{peer_ip}:{peer_port}] peerInit username: {} connection_type: {} token: {}",
         init_data.username, init_data.connection_type, init_data.token
     );
 
     let peer = Peer::new(
         format!("{}:direct", init_data.username),
-        // init_data.username.clone(),
         init_data.connection_type.clone(),
         peer_ip.clone(),
         peer_port.into(),

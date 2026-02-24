@@ -23,7 +23,7 @@ impl<Op> MessageDispatcher<Op> {
     }
 
     pub fn dispatch(&self, message: &mut Message) {
-        let code = message.get_message_code();
+        let code = message.get_message_code_u32();
 
         if let Some(handler) = self.handlers.get_handler(code) {
             message.set_pointer(8);

@@ -138,7 +138,6 @@ impl Message {
     //     return out.trim().into();
     // }
 
-    #[allow(dead_code)]
     pub fn get_message_code_u32(&self) -> u32 {
         u32::from_le_bytes(self.data[4..8].try_into().unwrap())
     }
@@ -225,21 +224,6 @@ impl Message {
             self.data[self.pointer + 7],
         ]);
         self.pointer += 8;
-        val
-    }
-
-    pub fn read_raw_byte(&mut self) -> Vec<u8> {
-        if self.pointer + 4 > self.data.len() {
-            return vec![];
-        }
-
-        let val = vec![
-            self.data[self.pointer],
-            self.data[self.pointer + 1],
-            self.data[self.pointer + 2],
-            self.data[self.pointer + 3],
-        ];
-        self.pointer += 4;
         val
     }
 

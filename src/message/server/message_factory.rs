@@ -36,9 +36,9 @@ impl MessageFactory {
             .write_int32(1)
             .write_string(username)
             .write_string(password)
-            .write_int32(157) // version
+            .write_int32(181) // version
             .write_string(&hash)
-            .write_int32(100)
+            .write_int32(1) // minor version
             .clone()
     }
 
@@ -76,10 +76,10 @@ impl MessageFactory {
             // .write_int32(port) // should be different port
             .clone()
     }
-    pub fn build_watch_user(token: u32) -> Message {
+    pub fn build_watch_user(username: &str) -> Message {
         Message::new()
-            .write_raw_bytes([5, 0, 0, 0, 0].to_vec())
-            .write_int32(token)
+            .write_int32(5)
+            .write_string(username)
             .clone()
     }
 
@@ -106,7 +106,7 @@ impl MessageFactory {
             .write_int32(41)
             .write_int32(transfer.token)
             .write_bool(true)
-            // .write_int64(transfer.size)
+            .write_int64(transfer.size)
             .clone()
     }
     pub fn build_pierce_firewall_message(token: u32) -> Message {
@@ -133,9 +133,9 @@ impl MessageFactory {
 
 #[test]
 fn test_build_watch_user() {
-    let token: u32 = 223;
-    let message = MessageFactory::build_watch_user(token);
-    let expect: Vec<u8> = [5, 0, 0, 0, 0, 223, 0, 0, 0].to_vec();
+    let message = MessageFactory::build_watch_user("bob");
+    // code(5u32) + string_len(3u32) + "bob"
+    let expect: Vec<u8> = [5, 0, 0, 0, 3, 0, 0, 0, b'b', b'o', b'b'].to_vec();
 
     assert_eq!(expect, message.get_data())
 }
@@ -148,9 +148,9 @@ fn test_build_login_message() {
     let expect: Vec<u8> = [
         1, 0, 0, 0, 20, 0, 0, 0, 105, 110, 115, 97, 110, 101, 95, 105, 110, 95,
         116, 104, 101, 95, 98, 114, 97, 105, 110, 50, 8, 0, 0, 0, 49, 51, 51,
-        55, 53, 49, 51, 55, 157, 0, 0, 0, 32, 0, 0, 0, 50, 101, 100, 102, 53,
+        55, 53, 49, 51, 55, 181, 0, 0, 0, 32, 0, 0, 0, 50, 101, 100, 102, 53,
         49, 100, 48, 51, 55, 57, 52, 51, 55, 56, 102, 56, 98, 98, 54, 51, 49,
-        48, 100, 52, 54, 48, 99, 50, 50, 98, 49, 100, 0, 0, 0,
+        48, 100, 52, 54, 48, 99, 50, 50, 98, 49, 1, 0, 0, 0,
     ]
     .to_vec();
 
