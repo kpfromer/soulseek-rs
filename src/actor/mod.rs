@@ -1,9 +1,9 @@
-use std::sync::Arc;
-use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::{Duration, Instant};
 
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
+
 use crate::trace;
-use crate::utils::thread_pool::ThreadPool;
 
 pub mod peer_actor;
 pub mod peer_registry;
@@ -17,7 +17,7 @@ pub enum ConnectionState {
 }
 /// Core actor trait - each actor processes messages
 pub trait Actor: Send + 'static {
-    type Message: Send + Clone + 'static;
+    type Message: Send + 'static;
 
     /// Handle a single message
     fn handle(&mut self, msg: Self::Message);
@@ -32,9 +32,16 @@ pub trait Actor: Send + 'static {
     fn tick(&mut self) {}
 }
 
-#[derive(Clone)]
 pub struct ActorHandle<M: Send> {
-    pub(crate) sender: Sender<ActorMessage<M>>,
+    pub(crate) sender: mpsc::UnboundedSender<ActorMessage<M>>,
+}
+
+impl<M: Send> Clone for ActorHandle<M> {
+    fn clone(&self) -> Self {
+        Self {
+            sender: self.sender.clone(),
+        }
+    }
 }
 
 impl<M: Send> ActorHandle<M> {
@@ -62,25 +69,39 @@ pub(crate) enum ActorMessage<M> {
 
 /// Actor system that manages actor lifecycle
 pub struct ActorSystem {
-    thread_pool: Arc<ThreadPool>,
+    cancellation_token: CancellationToken,
 }
 
 impl ActorSystem {
-    pub fn new(thread_pool: Arc<ThreadPool>) -> Self {
-        ActorSystem { thread_pool }
+    pub fn new() -> Self {
+        ActorSystem {
+            cancellation_token: CancellationToken::new(),
+        }
+    }
+
+    /// Get a reference to the cancellation token for external tasks (e.g., listener)
+    pub fn cancellation_token(&self) -> &CancellationToken {
+        &self.cancellation_token
+    }
+
+    /// Shutdown all spawned actors by cancelling the token
+    pub fn shutdown(&self) {
+        self.cancellation_token.cancel();
     }
 
     /// Spawn a new actor and return its handle
     pub fn spawn<A: Actor>(&self, mut actor: A) -> ActorHandle<A::Message> {
-        let (sender, receiver) = channel::<ActorMessage<A::Message>>();
+        let (sender, receiver) = mpsc::unbounded_channel::<ActorMessage<A::Message>>();
         let handle = ActorHandle {
             sender: sender.clone(),
         };
 
-        // Start the actor event loop on the thread pool
-        self.thread_pool.execute(move || {
+        let token = self.cancellation_token.child_token();
+
+        // Start the actor event loop as a tokio task
+        tokio::spawn(async move {
             actor.on_start();
-            Self::run_actor_loop(&mut actor, receiver);
+            Self::run_actor_loop(&mut actor, receiver, token).await;
             actor.on_stop();
         });
 
@@ -97,67 +118,72 @@ impl ActorSystem {
     where
         F: FnOnce(&mut A, ActorHandle<A::Message>) + Send + 'static,
     {
-        let (sender, receiver) = channel::<ActorMessage<A::Message>>();
+        let (sender, receiver) = mpsc::unbounded_channel::<ActorMessage<A::Message>>();
         let handle = ActorHandle {
             sender: sender.clone(),
         };
         let handle_for_init = handle.clone();
 
-        self.thread_pool.execute(move || {
+        let token = self.cancellation_token.child_token();
+
+        tokio::spawn(async move {
             init(&mut actor, handle_for_init);
             actor.on_start();
-            Self::run_actor_loop(&mut actor, receiver);
+            Self::run_actor_loop(&mut actor, receiver, token).await;
             actor.on_stop();
         });
 
         handle
     }
 
-    fn run_actor_loop<A: Actor>(
+    async fn run_actor_loop<A: Actor>(
         actor: &mut A,
-        receiver: Receiver<ActorMessage<A::Message>>,
+        mut receiver: mpsc::UnboundedReceiver<ActorMessage<A::Message>>,
+        cancellation_token: CancellationToken,
     ) {
         let tick_interval = Duration::from_millis(100);
-        let mut last_tick = Instant::now();
         let mut message_count = 0;
         let mut tick_count = 0;
 
         loop {
-            match receiver.recv_timeout(tick_interval) {
-                Ok(ActorMessage::UserMessage(msg)) => {
-                    message_count += 1;
-                    actor.handle(msg);
-                }
-                Ok(ActorMessage::Stop) => {
+            tokio::select! {
+                _ = cancellation_token.cancelled() => {
                     trace!(
-                        "[actor_system] Received Stop message, breaking loop"
+                        "[actor_system] Cancellation token triggered, breaking loop"
                     );
                     break;
                 }
-                Ok(ActorMessage::Tick) => {
-                    tick_count += 1;
-                    trace!(
-                        "[actor_system] Received explicit Tick message #{}",
-                        tick_count
-                    );
-
-                    actor.tick();
-                }
-                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                    if last_tick.elapsed() >= tick_interval {
-                        tick_count += 1;
-                        // if tick_count % 10 == 0 {
-                        //     trace!("[actor_system] Periodic tick #{} (every 1s log)", tick_count);
-                        // }
-                        actor.tick();
-                        last_tick = Instant::now();
+                msg = receiver.recv() => {
+                    match msg {
+                        Some(ActorMessage::UserMessage(msg)) => {
+                            message_count += 1;
+                            actor.handle(msg);
+                        }
+                        Some(ActorMessage::Stop) => {
+                            trace!(
+                                "[actor_system] Received Stop message, breaking loop"
+                            );
+                            break;
+                        }
+                        Some(ActorMessage::Tick) => {
+                            tick_count += 1;
+                            trace!(
+                                "[actor_system] Received explicit Tick message #{}",
+                                tick_count
+                            );
+                            actor.tick();
+                        }
+                        None => {
+                            trace!(
+                                "[actor_system] Channel disconnected, breaking loop"
+                            );
+                            break;
+                        }
                     }
                 }
-                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                    trace!(
-                        "[actor_system] Channel disconnected, breaking loop"
-                    );
-                    break;
+                _ = tokio::time::sleep(tick_interval) => {
+                    tick_count += 1;
+                    actor.tick();
                 }
             }
         }
@@ -168,9 +194,16 @@ impl ActorSystem {
     }
 }
 
+impl Default for ActorSystem {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct CounterActor {
@@ -193,10 +226,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_actor_system() {
-        let thread_pool = Arc::new(ThreadPool::new(4));
-        let system = ActorSystem::new(thread_pool.clone());
+    #[tokio::test]
+    async fn test_actor_system() {
+        let system = Arc::new(ActorSystem::new());
 
         let count = Arc::new(AtomicUsize::new(0));
         let actor = CounterActor {
@@ -211,7 +243,7 @@ mod tests {
         handle.send(3).unwrap();
 
         // Give actor time to process
-        std::thread::sleep(Duration::from_millis(100));
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         assert_eq!(count.load(Ordering::SeqCst), 6);
 
@@ -219,9 +251,55 @@ mod tests {
         handle.stop().unwrap();
 
         // Give actor time to process the stop message
-        std::thread::sleep(Duration::from_millis(100));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 
-        // Drop the thread pool explicitly to wait for all threads
-        drop(thread_pool);
+    #[tokio::test]
+    async fn test_actor_system_shutdown() {
+        let system = Arc::new(ActorSystem::new());
+
+        let count = Arc::new(AtomicUsize::new(0));
+        let stopped = Arc::new(AtomicUsize::new(0));
+
+        let actor1 = CounterActorWithStop {
+            count: count.clone(),
+            stopped: stopped.clone(),
+        };
+        let actor2 = CounterActorWithStop {
+            count: count.clone(),
+            stopped: stopped.clone(),
+        };
+
+        let _handle1 = system.spawn(actor1);
+        let _handle2 = system.spawn(actor2);
+
+        _handle1.send(1).unwrap();
+        _handle2.send(2).unwrap();
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(count.load(Ordering::SeqCst), 3);
+
+        // Shutdown should stop all actors
+        system.shutdown();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        assert_eq!(stopped.load(Ordering::SeqCst), 2);
+    }
+
+    struct CounterActorWithStop {
+        count: Arc<AtomicUsize>,
+        stopped: Arc<AtomicUsize>,
+    }
+
+    impl Actor for CounterActorWithStop {
+        type Message = usize;
+
+        fn handle(&mut self, msg: Self::Message) {
+            self.count.fetch_add(msg, Ordering::SeqCst);
+        }
+
+        fn on_stop(&mut self) {
+            self.stopped.fetch_add(1, Ordering::SeqCst);
+        }
     }
 }

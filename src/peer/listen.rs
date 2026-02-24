@@ -1,8 +1,9 @@
 use std::io;
-use std::net::{TcpListener, TcpStream};
-use std::sync::mpsc::Sender;
 use std::sync::{Arc, RwLock};
-use std::thread;
+
+use tokio::io::AsyncReadExt;
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::mpsc::UnboundedSender;
 
 use crate::client::{ClientContext, ClientOperation};
 
@@ -17,7 +18,7 @@ const PIERCE_FIREWALL_MESSAGE_CODE: u8 = 0;
 #[derive(Clone)]
 struct ConnectionContext {
     #[allow(dead_code)]
-    client_sender: Sender<ClientOperation>,
+    client_sender: UnboundedSender<ClientOperation>,
     client_context: Arc<RwLock<ClientContext>>,
     own_username: String,
 }
@@ -28,12 +29,20 @@ struct PeerInitData {
     token: u32,
 }
 
-fn read_peer_init_message(
+async fn read_peer_init_message(
     stream: &mut TcpStream,
     reader: &mut MessageReader,
 ) -> io::Result<Message> {
+    let mut temp_buffer = [0u8; 1024];
     loop {
-        reader.read_from_socket(stream)?;
+        let n = stream.read(&mut temp_buffer).await?;
+        if n == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "Connection closed while reading peer init",
+            ));
+        }
+        reader.push_bytes(&temp_buffer[..n]);
 
         if let Ok(Some(msg)) = reader.extract_message() {
             return Ok(msg);
@@ -134,7 +143,7 @@ fn handle_peer_connection(
 
 fn handle_file_connection(
     peer: Peer,
-    stream: TcpStream,
+    stream: std::net::TcpStream,
     mut reader: MessageReader,
     token: u32,
     context: &ConnectionContext,
@@ -192,7 +201,7 @@ fn handle_file_connection(
     }
 }
 
-fn handle_incoming_connection(stream: TcpStream, context: ConnectionContext) {
+async fn handle_incoming_connection(stream: TcpStream, context: ConnectionContext) {
     let Ok(peer_addr) = stream.peer_addr() else {
         error!("[listener] failed to get peer address");
         return;
@@ -203,7 +212,7 @@ fn handle_incoming_connection(stream: TcpStream, context: ConnectionContext) {
     let mut stream = stream;
     let mut reader = MessageReader::new();
 
-    let Ok(mut message) = read_peer_init_message(&mut stream, &mut reader)
+    let Ok(mut message) = read_peer_init_message(&mut stream, &mut reader).await
     else {
         error!(
             "[listener:{peer_ip}:{peer_port}] Failed to read peer init message"
@@ -242,7 +251,10 @@ fn handle_incoming_connection(stream: TcpStream, context: ConnectionContext) {
             0,
         );
 
-        thread::spawn(move || {
+        // Convert tokio TcpStream to std for DownloadPeer (which still uses blocking I/O)
+        let std_stream = stream.into_std().unwrap();
+
+        tokio::task::spawn_blocking(move || {
             let download_peer = DownloadPeer::new(
                 peer.username.clone(),
                 peer.host.clone(),
@@ -255,7 +267,7 @@ fn handle_incoming_connection(stream: TcpStream, context: ConnectionContext) {
             match download_peer.download_file(
                 context.client_context.clone(),
                 download,
-                Some(stream),
+                Some(std_stream),
             ) {
                 Ok((download, filename)) => {
                     let _ = download.sender.send(DownloadStatus::Completed);
@@ -312,13 +324,15 @@ fn handle_incoming_connection(stream: TcpStream, context: ConnectionContext) {
         ),
 
         ConnectionType::F => {
-            thread::spawn(move || {
+            // Convert tokio TcpStream to std for blocking download
+            let std_stream = stream.into_std().unwrap();
+            tokio::task::spawn_blocking(move || {
                 trace!(
-                    "[listener:{peer_ip}:{peer_port}] handling file connection in thread"
+                    "[listener:{peer_ip}:{peer_port}] handling file connection in blocking task"
                 );
                 handle_file_connection(
                     peer,
-                    stream,
+                    std_stream,
                     reader,
                     init_data.token,
                     &context,
@@ -338,15 +352,16 @@ fn handle_incoming_connection(stream: TcpStream, context: ConnectionContext) {
 pub struct Listen {}
 
 impl Listen {
-    pub fn start(
+    pub async fn start(
         port: u32,
-        client_sender: Sender<ClientOperation>,
+        client_sender: UnboundedSender<ClientOperation>,
         client_context: Arc<RwLock<ClientContext>>,
         own_username: String,
     ) {
         info!("[listener] starting listener on port {port}");
 
         let listener = TcpListener::bind(format!("0.0.0.0:{port}"))
+            .await
             .expect("Failed to bind listener to port");
 
         let context = ConnectionContext {
@@ -355,17 +370,21 @@ impl Listen {
             own_username,
         };
 
-        for stream in listener.incoming() {
-            let Ok(stream) = stream else {
-                error!(
-                    "[listener] Failed to accept connection: {}",
-                    stream.unwrap_err()
-                );
-                continue;
-            };
-
-            let context = context.clone();
-            handle_incoming_connection(stream, context);
+        loop {
+            match listener.accept().await {
+                Ok((stream, _addr)) => {
+                    let context = context.clone();
+                    tokio::spawn(async move {
+                        handle_incoming_connection(stream, context).await;
+                    });
+                }
+                Err(e) => {
+                    error!(
+                        "[listener] Failed to accept connection: {}",
+                        e
+                    );
+                }
+            }
         }
     }
 }

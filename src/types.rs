@@ -1,4 +1,6 @@
-use std::{collections::HashMap, sync::mpsc::Sender};
+use std::collections::HashMap;
+
+use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{error::Result, message::Message, utils::zlib::deflate};
 
@@ -95,7 +97,7 @@ pub struct Download {
     pub size: u64,
     pub download_directory: String,
     pub status: DownloadStatus,
-    pub sender: Sender<DownloadStatus>,
+    pub sender: UnboundedSender<DownloadStatus>,
 }
 
 impl Download {

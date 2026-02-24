@@ -1,5 +1,5 @@
-use std::io::{self, Read};
-use std::{collections::VecDeque, net::TcpStream};
+use std::collections::VecDeque;
+use std::io;
 
 use crate::message::Message;
 
@@ -47,20 +47,9 @@ impl MessageReader {
         }
     }
 
-    pub fn read_from_socket(
-        &mut self,
-        stream: &mut TcpStream,
-    ) -> io::Result<()> {
-        let mut temp_buffer = [0; 1024]; // Temporary buffer for reading from the socket
-        let bytes_read = stream.read(&mut temp_buffer)?;
-        if bytes_read == 0 {
-            return Ok(());
-        }
-
-        // Add the read bytes to the internal buffer
-        self.buffer.extend(&temp_buffer[..bytes_read]);
-
-        Ok(())
+    /// Push raw bytes into the internal buffer (used when reading from async streams)
+    pub fn push_bytes(&mut self, data: &[u8]) {
+        self.buffer.extend(data);
     }
 
     pub fn buffer_len(&self) -> usize {

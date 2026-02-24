@@ -18,11 +18,13 @@ use crate::message::{Message, MessageReader};
 use crate::peer::ConnectionType;
 use crate::peer::Peer;
 
-use std::io::{self, Error, Write};
-use std::net::{TcpStream, ToSocketAddrs};
-use std::sync::mpsc::{Receiver, Sender};
-use std::sync::{Arc, RwLock};
+use std::io;
+use std::net::ToSocketAddrs;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use tokio::net::TcpStream;
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 use crate::{SoulseekRs, debug, error, info, trace, warn};
 
@@ -176,7 +178,7 @@ impl Room {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum ServerMessage {
     ProcessRead,
     LoginStatus(bool),
@@ -184,7 +186,7 @@ pub enum ServerMessage {
     Login {
         username: String,
         password: String,
-        response: std::sync::mpsc::Sender<Result<bool, SoulseekRs>>,
+        response: tokio::sync::oneshot::Sender<Result<bool, SoulseekRs>>,
     },
     FileSearch {
         token: u32,
@@ -205,30 +207,30 @@ pub enum ServerMessage {
 
 pub struct ServerActor {
     address: PeerAddress,
-    context: Arc<RwLock<Context>>,
+    context: Arc<std::sync::RwLock<Context>>,
     listen_port: u32,
     enable_listen: bool,
     stream: Option<TcpStream>,
     connection_state: ConnectionState,
     reader: MessageReader,
-    client_channel: Sender<ClientOperation>,
+    client_channel: UnboundedSender<ClientOperation>,
     self_handle: Option<ActorHandle<ServerMessage>>,
     dispatcher: Option<MessageDispatcher<ServerMessage>>,
-    dispatcher_receiver: Option<Receiver<ServerMessage>>,
-    dispatcher_sender: Option<Sender<ServerMessage>>,
+    dispatcher_receiver: Option<UnboundedReceiver<ServerMessage>>,
+    dispatcher_sender: Option<UnboundedSender<ServerMessage>>,
     queued_messages: Vec<ServerMessage>,
 }
 
 impl ServerActor {
     pub fn new(
         address: PeerAddress,
-        client_channel: Sender<ClientOperation>,
+        client_channel: UnboundedSender<ClientOperation>,
         listen_port: u32,
         enable_listen: bool,
     ) -> Self {
         Self {
             address,
-            context: Arc::new(RwLock::new(Context::new())),
+            context: Arc::new(std::sync::RwLock::new(Context::new())),
             listen_port,
             enable_listen,
             stream: None,
@@ -247,7 +249,7 @@ impl ServerActor {
         &self.address
     }
 
-    pub fn get_sender(&self) -> Option<&Sender<ServerMessage>> {
+    pub fn get_sender(&self) -> Option<&UnboundedSender<ServerMessage>> {
         self.dispatcher_sender.as_ref()
     }
 
@@ -273,27 +275,34 @@ impl ServerActor {
         let socket_addr = socket_addrs.next();
 
         match socket_addr {
-            Some(addr) => match TcpStream::connect(addr) {
-                Ok(stream) => {
-                    if let Err(e) = stream.set_nonblocking(true) {
-                        error!("[server] Failed to set non-blocking: {}", e);
-                        self.disconnect_with_error(e);
-                        return false;
+            Some(addr) => {
+                // Use std TcpStream for synchronous connect, then convert to tokio
+                match std::net::TcpStream::connect(addr) {
+                    Ok(std_stream) => {
+                        std_stream.set_nodelay(true).ok();
+                        std_stream.set_nonblocking(true).ok();
+
+                        match TcpStream::from_std(std_stream) {
+                            Ok(stream) => {
+                                self.stream = Some(stream);
+                                self.connection_state = ConnectionState::Connecting {
+                                    since: Instant::now(),
+                                };
+                                true
+                            }
+                            Err(e) => {
+                                error!("[server] Failed to convert to tokio TcpStream: {}", e);
+                                self.disconnect_with_error(e);
+                                false
+                            }
+                        }
                     }
-
-                    stream.set_nodelay(true).ok();
-
-                    self.stream = Some(stream);
-                    self.connection_state = ConnectionState::Connecting {
-                        since: Instant::now(),
-                    };
-                    true
+                    Err(e) => {
+                        self.disconnect_with_error(e);
+                        false
+                    }
                 }
-                Err(e) => {
-                    self.disconnect_with_error(e);
-                    false
-                }
-            },
+            }
             None => {
                 let error_msg =
                     format!("No socket addresses found for {}:{}", host, port);
@@ -313,7 +322,7 @@ impl ServerActor {
 
     fn initialize_dispatcher(&mut self) {
         let (dispatcher_sender, dispatcher_receiver) =
-            std::sync::mpsc::channel::<ServerMessage>();
+            mpsc::unbounded_channel::<ServerMessage>();
 
         self.dispatcher_receiver = Some(dispatcher_receiver);
         self.dispatcher_sender = Some(dispatcher_sender.clone());
@@ -347,7 +356,7 @@ impl ServerActor {
     fn process_dispatcher_messages(&mut self) {
         let messages: Vec<ServerMessage> = self
             .dispatcher_receiver
-            .as_ref()
+            .as_mut()
             .map_or_else(Vec::new, |receiver| {
                 let mut msgs = Vec::new();
                 while let Ok(msg) = receiver.try_recv() {
@@ -356,9 +365,9 @@ impl ServerActor {
                 msgs
             });
 
-        messages
-            .iter()
-            .for_each(|msg| self.handle_message(msg.clone()));
+        for msg in messages {
+            self.handle_message(msg);
+        }
     }
 
     pub fn login(
@@ -500,7 +509,7 @@ impl ServerActor {
                 let timeout = Duration::from_secs(5);
 
                 let context = self.context.clone();
-                std::thread::spawn(move || {
+                tokio::spawn(async move {
                     loop {
                         if start.elapsed() >= timeout {
                             let _ = response.send(Err(SoulseekRs::Timeout));
@@ -519,7 +528,7 @@ impl ServerActor {
                             break;
                         }
 
-                        std::thread::sleep(Duration::from_millis(100));
+                        tokio::time::sleep(Duration::from_millis(100)).await;
                     }
                 });
             }
@@ -535,13 +544,21 @@ impl ServerActor {
         }
 
         {
-            let stream = match self.stream.as_mut() {
+            let stream = match self.stream.as_ref() {
                 Some(s) => s,
                 None => return,
             };
 
-            match self.reader.read_from_socket(stream) {
-                Ok(()) => {}
+            // Use try_read for non-blocking read on tokio TcpStream
+            let mut temp_buffer = [0u8; 1024];
+            match stream.try_read(&mut temp_buffer) {
+                Ok(0) => {
+                    // Connection closed
+                    return;
+                }
+                Ok(n) => {
+                    self.reader.push_bytes(&temp_buffer[..n]);
+                }
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {}
                 Err(ref e) if e.kind() == io::ErrorKind::TimedOut => {
                     debug!("[server] Read operation timed out",);
@@ -612,7 +629,7 @@ impl ServerActor {
     }
 
     fn send_message(&mut self, message: Message) {
-        let stream = match self.stream.as_mut() {
+        let stream = match self.stream.as_ref() {
             Some(s) => s,
             None => {
                 error!("[server] Cannot send message: stream is None");
@@ -632,19 +649,25 @@ impl ServerActor {
                 .map_err(|e| e.to_string())
         );
 
-        if let Err(e) = stream.write_all(&message.get_buffer()) {
-            error!("[server] Error writing message: {}. Disconnecting.", e);
-            self.disconnect_with_error(e);
-            return;
-        }
-
-        if let Err(e) = stream.flush() {
-            error!("[server] Error flushing stream: {}. Disconnecting.", e);
-            self.disconnect_with_error(e);
+        let buf = message.get_buffer();
+        match stream.try_write(&buf) {
+            Ok(n) if n == buf.len() => {}
+            Ok(n) => {
+                // Partial write - for now treat as error
+                error!("[server] Partial write: {} of {} bytes", n, buf.len());
+            }
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                // TODO: buffer for later write
+                warn!("[server] Write would block, message may be lost");
+            }
+            Err(e) => {
+                error!("[server] Error writing message: {}. Disconnecting.", e);
+                self.disconnect_with_error(e);
+            }
         }
     }
 
-    fn disconnect_with_error(&mut self, _error: Error) {
+    fn disconnect_with_error(&mut self, _error: io::Error) {
         debug!("[server] disconnect");
 
         self.stream.take();
@@ -671,16 +694,29 @@ impl ServerActor {
             return;
         }
 
-        let Some(ref stream) = self.stream else {
+        if self.stream.is_none() {
             return;
-        };
+        }
 
-        match stream.peer_addr() {
+        // Since std::net::TcpStream::connect() is blocking and succeeded,
+        // the connection is established once we have a stream.
+        // Try a zero-byte read to verify the connection is still alive.
+        let stream = self.stream.as_ref().unwrap();
+        let mut buf = [0u8; 1];
+        match stream.try_read(&mut buf) {
             Ok(_) => {
+                // Got data or EOF - either way, connection was established
+                if buf[0] != 0 {
+                    self.reader.push_bytes(&buf[..1]);
+                }
                 self.connection_state = ConnectionState::Connected;
                 self.on_connection_established();
             }
-            Err(ref e) if e.kind() == io::ErrorKind::NotConnected => {}
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                // No data yet but socket is ready - connection established
+                self.connection_state = ConnectionState::Connected;
+                self.on_connection_established();
+            }
             Err(e) => {
                 error!("[server] Connection failed: {}", e);
                 self.disconnect_with_error(e);
