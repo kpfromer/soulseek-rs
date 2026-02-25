@@ -25,17 +25,25 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use crate::{debug, error, info, trace, warn};
 const DEFALT_LISTEN_PORT: u32 = 2234;
 
+/// A wrapper for a string that is plain text and is sent over the network via an unencrypted channel.
+/// Soulseek uses an unencrypted channel for the username and password.
+#[derive(Debug, Clone)]
+pub struct PlainTextUnencrypted(String);
+
 #[derive(Debug, Clone)]
 pub struct ClientSettings {
-    pub username: String,
-    pub password: String,
+    pub username: PlainTextUnencrypted,
+    pub password: PlainTextUnencrypted,
     pub server_address: PeerAddress,
     pub enable_listen: bool,
     pub listen_port: u32,
 }
 
 impl ClientSettings {
-    pub fn new(username: impl Into<String>, password: impl Into<String>) -> Self {
+    pub fn new(
+        username: impl Into<PlainTextUnencrypted>,
+        password: impl Into<PlainTextUnencrypted>,
+    ) -> Self {
         Self {
             username: username.into(),
             password: password.into(),
@@ -47,8 +55,8 @@ impl ClientSettings {
 impl Default for ClientSettings {
     fn default() -> Self {
         Self {
-            username: String::new(),
-            password: String::new(),
+            username: PlainTextUnencrypted(String::new()),
+            password: PlainTextUnencrypted(String::new()),
             server_address: PeerAddress::new("server.slsknet.org".to_string(), 2416),
             enable_listen: true,
             listen_port: DEFALT_LISTEN_PORT,
