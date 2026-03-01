@@ -601,9 +601,11 @@ impl Client {
                         } else if let Some(server_sender) =
                             &client_context.read().unwrap().server_sender
                         {
-                            server_sender
+                            if let Err(e) = server_sender
                                 .send(ServerMessage::GetPeerAddress(new_peer.username.clone()))
-                                .unwrap();
+                            {
+                                warn!("[client] Failed to send GetPeerAddress for {}: {}", new_peer.username, e);
+                            }
                         }
 
                         let addr = new_peer.tcp_stream.peer_addr().unwrap();

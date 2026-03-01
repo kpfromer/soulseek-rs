@@ -219,6 +219,12 @@ pub struct ServerActor {
     dispatcher_receiver: Option<UnboundedReceiver<ServerMessage>>,
     dispatcher_sender: Option<UnboundedSender<ServerMessage>>,
     queued_messages: Vec<ServerMessage>,
+    /// Stored credentials for automatic relogin after reconnect.
+    credentials: Option<(String, String)>,
+    /// Number of consecutive reconnect attempts (used for exponential backoff).
+    reconnect_attempt: u32,
+    /// Timestamp of the most recent disconnect (drives the reconnect backoff timer).
+    last_disconnect: Option<Instant>,
 }
 
 impl ServerActor {
@@ -242,6 +248,9 @@ impl ServerActor {
             client_channel,
             self_handle: None,
             queued_messages: Vec::new(),
+            credentials: None,
+            reconnect_attempt: 0,
+            last_disconnect: None,
         }
     }
 
@@ -454,6 +463,10 @@ impl ServerActor {
                 self.context.write().unwrap().logged_in = Some(logged_in);
 
                 if logged_in {
+                    // Successful login — reset reconnect backoff.
+                    self.reconnect_attempt = 0;
+                    self.last_disconnect = None;
+
                     // Post-login setup: tell the server about ourselves
                     self.queue_message(
                         MessageFactory::build_shared_folders_message(1, 499),
@@ -521,6 +534,9 @@ impl ServerActor {
                 password,
                 response,
             } => {
+                // Persist credentials so we can relogin automatically after a reconnect.
+                self.credentials = Some((username.clone(), password.clone()));
+
                 self.queue_message(MessageFactory::build_login_message(
                     &username, &password,
                 ));
@@ -688,15 +704,17 @@ impl ServerActor {
     }
 
     fn disconnect_with_error(&mut self, _error: io::Error) {
-        debug!("[server] disconnect");
-
+        warn!("[server] disconnecting due to error: {}", _error);
         self.stream.take();
+        self.connection_state = ConnectionState::Disconnected;
+        self.last_disconnect = Some(Instant::now());
+        self.context.write().unwrap().logged_in = None;
     }
 
     fn disconnect(&mut self) {
         debug!("[server] disconnected");
-
         self.stream.take();
+        self.connection_state = ConnectionState::Disconnected;
     }
 
     fn check_connection_status(&mut self) {
@@ -751,6 +769,14 @@ impl ServerActor {
 
         self.initialize_dispatcher();
 
+        // Auto-relogin when reconnecting (credentials were stored on the first Login call).
+        if let Some((username, password)) = self.credentials.clone() {
+            info!("[server] Reconnected — auto-relogging in as {}", username);
+            self.queue_message(MessageFactory::build_login_message(
+                &username, &password,
+            ));
+        }
+
         let queued = std::mem::take(&mut self.queued_messages);
         for msg in queued {
             self.handle_message(msg);
@@ -761,6 +787,30 @@ impl ServerActor {
         }
 
         self.process_read();
+    }
+
+    /// Attempt to reconnect to the server using exponential backoff.
+    /// Called every tick while in `Disconnected` state.
+    fn maybe_reconnect(&mut self) {
+        let Some(last_disconnect) = self.last_disconnect else {
+            return;
+        };
+
+        // Backoff: 2, 4, 8, 16, 32, 60, 60, … seconds
+        let backoff_secs = (2u64.pow(self.reconnect_attempt.min(5))).min(60);
+        if last_disconnect.elapsed() < Duration::from_secs(backoff_secs) {
+            return;
+        }
+
+        info!(
+            "[server] Attempting to reconnect (attempt {}, backoff {}s)…",
+            self.reconnect_attempt + 1,
+            backoff_secs,
+        );
+        self.reconnect_attempt += 1;
+        // Reset the timer so the next failure waits a full backoff period.
+        self.last_disconnect = Some(Instant::now());
+        self.initiate_connection();
     }
 }
 
@@ -795,7 +845,9 @@ impl Actor for ServerActor {
                     self.process_read();
                 }
             }
-            ConnectionState::Disconnected => {}
+            ConnectionState::Disconnected => {
+                self.maybe_reconnect();
+            }
         }
     }
 }
