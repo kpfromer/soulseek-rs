@@ -1,6 +1,7 @@
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{
+    error,
     message::{Message, MessageHandler},
     peer::PeerMessage,
     trace,
@@ -23,6 +24,8 @@ impl MessageHandler<PeerMessage> for PeerInit {
             username, connection_type, token
         );
 
-        sender.send(PeerMessage::SetUsername(username)).unwrap();
+        if let Err(e) = sender.send(PeerMessage::SetUsername(username)) {
+            error!("[peer_init] Failed to send SetUsername: {}", e);
+        }
     }
 }

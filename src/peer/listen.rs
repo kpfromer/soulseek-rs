@@ -69,22 +69,16 @@ fn parse_peer_init_message(mut message: Message) -> Option<PeerInitData> {
         return None;
     }
 
-    Some(PeerInitData {
-        username: message.read_string(),
-        connection_type: message.read_string().parse().unwrap(),
-        token: message.read_int32(),
-    })
+    let username = message.read_string();
+    let connection_type = message.read_string().parse().ok()?;
+    let token = message.read_int32();
+
+    Some(PeerInitData { username, connection_type, token })
 }
 
-fn parse_token_from_buffer(buffer: &[u8], username: &str) -> Option<u32> {
-    let token_bytes = buffer.get(0..4)?;
-    let token = u32::from_le_bytes(token_bytes.try_into().unwrap_or_else(|_| {
-        panic!(
-            "[listener:{}] slice with incorrect length, can't extract transfer_token",
-            username
-        )
-    }));
-    Some(token)
+fn parse_token_from_buffer(buffer: &[u8]) -> Option<u32> {
+    let token_bytes: [u8; 4] = buffer.get(0..4)?.try_into().ok()?;
+    Some(u32::from_le_bytes(token_bytes))
 }
 
 fn extract_download_from_buffer(
@@ -98,13 +92,13 @@ fn extract_download_from_buffer(
         return None;
     }
     let buffer = reader.get_buffer();
-    let token = parse_token_from_buffer(&buffer, username)?;
+    let token = parse_token_from_buffer(&buffer)?;
     trace!(
         "[listener:{}] got transfer_token: {} from data chunk",
         username, token
     );
 
-    let context = client_context.read().unwrap();
+    let context = client_context.read().unwrap_or_else(|e| e.into_inner());
     let download = context.get_download_by_token(token).cloned();
 
     if download.is_none() {
@@ -126,7 +120,7 @@ fn handle_peer_connection(
     _peer_ip: &str,
     _peer_port: u16,
 ) {
-    let client_context = context.client_context.read().unwrap();
+    let client_context = context.client_context.read().unwrap_or_else(|e| e.into_inner());
     if let Some(ref registry) = client_context.peer_registry {
         match registry.register_peer(peer.clone(), Some(stream), Some(reader)) {
             Ok(_) => (),
@@ -219,7 +213,7 @@ async fn handle_incoming_connection(stream: TcpStream, context: ConnectionContex
         );
 
         let download = {
-            let client_context = context.client_context.read().unwrap();
+            let client_context = context.client_context.read().unwrap_or_else(|e| e.into_inner());
             client_context.get_download_by_token(token).cloned()
         };
 
@@ -243,7 +237,13 @@ async fn handle_incoming_connection(stream: TcpStream, context: ConnectionContex
         );
 
         // Convert tokio TcpStream to std for DownloadPeer (which still uses blocking I/O)
-        let std_stream = stream.into_std().unwrap();
+        let std_stream = match stream.into_std() {
+            Ok(s) => s,
+            Err(e) => {
+                error!("[listener:{peer_ip}:{peer_port}] Failed to convert stream: {}", e);
+                return;
+            }
+        };
 
         tokio::task::spawn_blocking(move || {
             let download_peer = DownloadPeer::new(
@@ -265,7 +265,7 @@ async fn handle_incoming_connection(stream: TcpStream, context: ConnectionContex
                     context
                         .client_context
                         .write()
-                        .unwrap()
+                        .unwrap_or_else(|e| e.into_inner())
                         .update_download_with_status(download.token, DownloadStatus::Completed);
                     info!(
                         "Successfully downloaded {} bytes to {}",
@@ -311,7 +311,16 @@ async fn handle_incoming_connection(stream: TcpStream, context: ConnectionContex
 
         ConnectionType::F => {
             // Convert tokio TcpStream to std for blocking download
-            let std_stream = stream.into_std().unwrap();
+            let std_stream = match stream.into_std() {
+                Ok(s) => s,
+                Err(e) => {
+                    error!(
+                        "[listener:{peer_ip}:{peer_port}] Failed to convert stream: {}",
+                        e
+                    );
+                    return;
+                }
+            };
             tokio::task::spawn_blocking(move || {
                 trace!(
                     "[listener:{peer_ip}:{peer_port}] handling file connection in blocking task"

@@ -1,3 +1,4 @@
+use crate::error;
 use crate::message::{Message, MessageHandler};
 use crate::peer::PeerMessage;
 use crate::types::SearchResult;
@@ -14,9 +15,9 @@ impl MessageHandler<PeerMessage> for FileSearchResponse {
             Err(_) => return, // Skip malformed search results
         };
 
-        sender
-            .send(PeerMessage::FileSearchResult(file_search))
-            .unwrap();
+        if let Err(e) = sender.send(PeerMessage::FileSearchResult(file_search)) {
+            error!("[file_search_response] Failed to send FileSearchResult: {}", e);
+        }
     }
 }
 

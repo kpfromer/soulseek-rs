@@ -25,7 +25,8 @@ impl NewPeer {
         tcp_stream: TcpStream,
     ) -> Self {
         let username = message.read_string();
-        let connection_type = message.read_string().parse().unwrap();
+        let connection_type =
+            message.read_string().parse().unwrap_or(ConnectionType::P);
         let token = message.read_int32();
 
         Self {
@@ -117,7 +118,8 @@ impl Peer {
     #[allow(dead_code)]
     pub fn new_from_message(message: &mut Message) -> Self {
         let username = message.read_string();
-        let connection_type = message.read_string().parse().unwrap();
+        let connection_type =
+            message.read_string().parse().unwrap_or(ConnectionType::P);
 
         let mut ip: Vec<i32> = vec![];
         for _ in 0..4 {

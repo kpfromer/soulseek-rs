@@ -1,4 +1,5 @@
 use crate::{
+    error,
     message::{Message, MessageHandler},
     peer::PeerMessage,
 };
@@ -16,12 +17,12 @@ impl MessageHandler<PeerMessage> for TransferResponse {
         let allowed = message.read_int8();
         let reason = (allowed == 0).then(|| message.read_string());
 
-        sender
-            .send(PeerMessage::TransferResponse {
-                token,
-                allowed: allowed == 1,
-                reason,
-            })
-            .unwrap();
+        if let Err(e) = sender.send(PeerMessage::TransferResponse {
+            token,
+            allowed: allowed == 1,
+            reason,
+        }) {
+            error!("[transfer_response] Failed to send TransferResponse: {}", e);
+        }
     }
 }

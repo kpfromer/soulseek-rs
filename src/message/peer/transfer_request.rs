@@ -1,4 +1,5 @@
 use crate::{
+    error,
     message::{Message, MessageHandler},
     peer::PeerMessage,
     types::Transfer,
@@ -13,6 +14,8 @@ impl MessageHandler<PeerMessage> for TransferRequest {
     fn handle(&self, message: &mut Message, sender: UnboundedSender<PeerMessage>) {
         let transfer = Transfer::new_from_message(message);
 
-        sender.send(PeerMessage::TransferRequest(transfer)).unwrap();
+        if let Err(e) = sender.send(PeerMessage::TransferRequest(transfer)) {
+            error!("[transfer_request] Failed to send TransferRequest: {}", e);
+        }
     }
 }

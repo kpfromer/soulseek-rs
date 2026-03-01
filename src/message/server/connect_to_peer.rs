@@ -1,4 +1,5 @@
 use crate::actor::server_actor::ServerMessage;
+use crate::error;
 use crate::message::{Message, MessageHandler};
 use crate::peer::Peer;
 use tokio::sync::mpsc::UnboundedSender;
@@ -10,6 +11,8 @@ impl MessageHandler<ServerMessage> for ConnectToPeerHandler {
     }
     fn handle(&self, message: &mut Message, sender: UnboundedSender<ServerMessage>) {
         let peer = Peer::new_from_message(message);
-        sender.send(ServerMessage::ConnectToPeer(peer)).unwrap();
+        if let Err(e) = sender.send(ServerMessage::ConnectToPeer(peer)) {
+            error!("[connect_to_peer] Failed to send ConnectToPeer: {}", e);
+        }
     }
 }

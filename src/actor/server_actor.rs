@@ -336,9 +336,12 @@ impl ServerActor {
         self.dispatcher_receiver = Some(dispatcher_receiver);
         self.dispatcher_sender = Some(dispatcher_sender.clone());
 
-        self.client_channel
+        if let Err(e) = self
+            .client_channel
             .send(ClientOperation::SetServerSender(dispatcher_sender.clone()))
-            .unwrap();
+        {
+            error!("[server] Failed to send SetServerSender: {}", e);
+        }
 
         let mut handlers = Handlers::new();
 
@@ -399,7 +402,7 @@ impl ServerActor {
             }
 
             {
-                logged_in = context.read().unwrap().logged_in
+                logged_in = context.read().unwrap_or_else(|e| e.into_inner()).logged_in
             }
 
             if logged_in.is_some() {
@@ -409,7 +412,7 @@ impl ServerActor {
             std::thread::sleep(Duration::from_millis(50));
         }
 
-        if logged_in.unwrap() {
+        if logged_in.unwrap_or(false) {
             info!("Logged in as {}", username);
             self.queue_message(MessageFactory::build_shared_folders_message(
                 1, 499,
@@ -425,7 +428,7 @@ impl ServerActor {
             }
         }
 
-        Ok(logged_in.unwrap())
+        Ok(logged_in.unwrap_or(false))
     }
 
     pub fn file_search(&mut self, token: u32, query: &str) {
@@ -456,11 +459,13 @@ impl ServerActor {
                     }
                     ConnectionType::D => None,
                 } {
-                    self.client_channel.send(op).unwrap();
+                    if let Err(e) = self.client_channel.send(op) {
+                        error!("[server] Failed to send ConnectToPeer: {}", e);
+                    }
                 }
             }
             ServerMessage::LoginStatus(logged_in) => {
-                self.context.write().unwrap().logged_in = Some(logged_in);
+                self.context.write().unwrap_or_else(|e| e.into_inner()).logged_in = Some(logged_in);
 
                 if logged_in {
                     // Successful login — reset reconnect backoff.
@@ -553,7 +558,7 @@ impl ServerActor {
                         }
 
                         if let Some(logged_in) =
-                            context.read().unwrap().logged_in
+                            context.read().unwrap_or_else(|e| e.into_inner()).logged_in
                         {
                             let result = if logged_in {
                                 Ok(true)
@@ -679,7 +684,7 @@ impl ServerActor {
                 .get_message_name(
                     MessageType::Server,
                     u32::from_le_bytes(
-                        message.get_slice(0, 4).try_into().unwrap()
+                        message.get_slice(0, 4).try_into().unwrap_or([0; 4])
                     )
                 )
                 .map_err(|e| e.to_string())
@@ -708,7 +713,7 @@ impl ServerActor {
         self.stream.take();
         self.connection_state = ConnectionState::Disconnected;
         self.last_disconnect = Some(Instant::now());
-        self.context.write().unwrap().logged_in = None;
+        self.context.write().unwrap_or_else(|e| e.into_inner()).logged_in = None;
     }
 
     fn disconnect(&mut self) {
@@ -739,7 +744,9 @@ impl ServerActor {
         // Since std::net::TcpStream::connect() is blocking and succeeded,
         // the connection is established once we have a stream.
         // Try a zero-byte read to verify the connection is still alive.
-        let stream = self.stream.as_ref().unwrap();
+        let Some(stream) = self.stream.as_ref() else {
+            return;
+        };
         let mut buf = [0u8; 1];
         match stream.try_read(&mut buf) {
             Ok(_) => {
@@ -763,9 +770,10 @@ impl ServerActor {
     }
 
     fn on_connection_established(&mut self) {
-        let Some(_) = self.stream else {
-            panic!("Stream should be available here")
-        };
+        if self.stream.is_none() {
+            error!("[server] on_connection_established called without a stream");
+            return;
+        }
 
         self.initialize_dispatcher();
 

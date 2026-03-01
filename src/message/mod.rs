@@ -139,7 +139,10 @@ impl Message {
     // }
 
     pub fn get_message_code_u32(&self) -> u32 {
-        u32::from_le_bytes(self.data[4..8].try_into().unwrap())
+        if self.data.len() < 8 {
+            return 0;
+        }
+        u32::from_le_bytes(self.data[4..8].try_into().unwrap_or([0; 4]))
     }
 
     pub fn get_message_code(&self) -> u8 {
@@ -304,8 +307,7 @@ impl Message {
         let mut b = Vec::new();
         for i in (0..val.len()).step_by(2) {
             let byte_str = &val[i..i + 2];
-            let byte =
-                u8::from_str_radix(byte_str, 16).expect("Invalid hex string");
+            let byte = u8::from_str_radix(byte_str, 16).unwrap_or(0);
             b.push(byte);
         }
         self.data.extend_from_slice(&b);

@@ -1,4 +1,5 @@
 use crate::{
+    error,
     message::{Message, MessageHandler},
     peer::PeerMessage,
 };
@@ -15,8 +16,8 @@ impl MessageHandler<PeerMessage> for PlaceInQueueResponse {
         let filename = message.read_string();
         let place = message.read_int32();
 
-        sender
-            .send(PeerMessage::PlaceInQueueResponse { filename, place })
-            .unwrap();
+        if let Err(e) = sender.send(PeerMessage::PlaceInQueueResponse { filename, place }) {
+            error!("[place_in_queue_response] Failed to send PlaceInQueueResponse: {}", e);
+        }
     }
 }

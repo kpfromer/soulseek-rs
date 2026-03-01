@@ -1,4 +1,5 @@
 use crate::{
+    error,
     message::{Message, MessageHandler, server::MessageFactory},
     peer::PeerMessage,
 };
@@ -12,6 +13,8 @@ impl MessageHandler<PeerMessage> for GetShareFileList {
     fn handle(&self, _message: &mut Message, sender: UnboundedSender<PeerMessage>) {
         let message = MessageFactory::build_shared_folders_message(100, 800);
 
-        sender.send(PeerMessage::SendMessage(message)).unwrap();
+        if let Err(e) = sender.send(PeerMessage::SendMessage(message)) {
+            error!("[get_share_file_list] Failed to send SendMessage: {}", e);
+        }
     }
 }

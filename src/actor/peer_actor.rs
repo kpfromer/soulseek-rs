@@ -148,23 +148,28 @@ impl PeerActor {
                 self.send_message(message);
             }
             PeerMessage::FileSearchResult(file_search) => {
-                self.client_channel
+                if let Err(e) = self
+                    .client_channel
                     .send(ClientOperation::SearchResult(file_search))
-                    .unwrap();
+                {
+                    error!("[peer_actor] Failed to send SearchResult: {}", e);
+                }
             }
             PeerMessage::TransferRequest(transfer) => {
-                let username = self.peer.read().unwrap().username.clone();
+                let username = self.peer.read().unwrap_or_else(|e| e.into_inner()).username.clone();
                 debug!(
                     "[peer:{}] TransferRequest for {}",
                     username, transfer.token
                 );
 
-                self.client_channel
-                    .send(ClientOperation::UpdateDownloadTokens(
+                if let Err(e) = self.client_channel.send(
+                    ClientOperation::UpdateDownloadTokens(
                         transfer.clone(),
                         username.clone(),
-                    ))
-                    .unwrap();
+                    ),
+                ) {
+                    error!("[peer_actor] Failed to send UpdateDownloadTokens: {}", e);
+                }
 
                 let transfer_response =
                     MessageFactory::build_transfer_response_message(transfer);
@@ -184,7 +189,7 @@ impl PeerActor {
                 allowed,
                 reason,
             } => {
-                let username = self.peer.read().unwrap().username.clone();
+                let username = self.peer.read().unwrap_or_else(|e| e.into_inner()).username.clone();
                 debug!(
                     "[peer:{}] transfer response token: {} allowed: {}",
                     username, token, allowed
@@ -202,17 +207,19 @@ impl PeerActor {
                         "[peer:{}] Transfer allowed, ready to connect with token {:}",
                         username, token
                     );
-                    self.client_channel
-                        .send(ClientOperation::DownloadFromPeer(
+                    if let Err(e) = self.client_channel.send(
+                        ClientOperation::DownloadFromPeer(
                             token,
-                            self.peer.read().unwrap().clone(),
+                            self.peer.read().unwrap_or_else(|e| e.into_inner()).clone(),
                             allowed,
-                        ))
-                        .unwrap();
+                        ),
+                    ) {
+                        error!("[peer_actor] Failed to send DownloadFromPeer: {}", e);
+                    }
                 }
             }
             PeerMessage::PlaceInQueueResponse { filename, place } => {
-                let username = self.peer.read().unwrap().username.clone();
+                let username = self.peer.read().unwrap_or_else(|e| e.into_inner()).username.clone();
                 debug!(
                     "[peer:{}] Place in queue response - file: {}, place: {}",
                     username, filename, place
@@ -221,10 +228,10 @@ impl PeerActor {
             PeerMessage::SetUsername(username) => {
                 trace!(
                     "[peer:{}] SetUsername: {}",
-                    self.peer.read().unwrap().username,
+                    self.peer.read().unwrap_or_else(|e| e.into_inner()).username,
                     username
                 );
-                self.peer.write().unwrap().username = username;
+                self.peer.write().unwrap_or_else(|e| e.into_inner()).username = username;
             }
             PeerMessage::QueueUpload(filename) => {
                 let message =
@@ -250,9 +257,12 @@ impl PeerActor {
                 self.disconnect_with_error(e);
             }
             PeerMessage::UploadFailed(username, filename) => {
-                self.client_channel
+                if let Err(e) = self
+                    .client_channel
                     .send(ClientOperation::UploadFailed(username, filename))
-                    .unwrap();
+                {
+                    error!("[peer_actor] Failed to send UploadFailed: {}", e);
+                }
             }
         }
     }
@@ -279,14 +289,14 @@ impl PeerActor {
                 }
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {}
                 Err(ref e) if e.kind() == io::ErrorKind::TimedOut => {
-                    let peer_lock = self.peer.read().unwrap();
+                    let peer_lock = self.peer.read().unwrap_or_else(|e| e.into_inner());
                     debug!(
                         "Read operation timed out for peer actor {:}:{:}",
                         peer_lock.host, peer_lock.port
                     );
                 }
                 Err(e) => {
-                    let username = self.peer.read().unwrap().username.clone();
+                    let username = self.peer.read().unwrap_or_else(|e| e.into_inner()).username.clone();
                     error!(
                         "[peer:{}] Error reading from peer: {} (kind: {:?}). Disconnecting.",
                         username,
@@ -302,7 +312,7 @@ impl PeerActor {
     }
 
     fn extract_and_process_messages(&mut self) {
-        let username = self.peer.read().unwrap().username.clone();
+        let username = self.peer.read().unwrap_or_else(|e| e.into_inner()).username.clone();
         let mut extracted_count = 0;
         loop {
             match self.reader.extract_message() {
@@ -351,7 +361,7 @@ impl PeerActor {
             }
         };
 
-        let username = self.peer.read().unwrap().username.clone();
+        let username = self.peer.read().unwrap_or_else(|e| e.into_inner()).username.clone();
         trace!(
             "[peer:{}] ➡ {:?}",
             username,
@@ -359,7 +369,7 @@ impl PeerActor {
                 .get_message_name(
                     MessageType::Peer,
                     u32::from_le_bytes(
-                        message.get_slice(0, 4).try_into().unwrap()
+                        message.get_slice(0, 4).try_into().unwrap_or([0; 4])
                     )
                 )
                 .map_err(|e| e.to_string())
@@ -393,7 +403,7 @@ impl PeerActor {
     }
 
     fn disconnect_with_error(&mut self, error: io::Error) {
-        let username = self.peer.read().unwrap().username.clone();
+        let username = self.peer.read().unwrap_or_else(|e| e.into_inner()).username.clone();
         debug!("[peer:{}] disconnect", username);
 
         self.stream.take();
@@ -405,7 +415,7 @@ impl PeerActor {
         }
     }
     fn disconnect(&mut self) {
-        let username = self.peer.read().unwrap().username.clone();
+        let username = self.peer.read().unwrap_or_else(|e| e.into_inner()).username.clone();
         debug!("[peer:{}] disconnect", username);
 
         self.stream.take();
@@ -419,7 +429,7 @@ impl PeerActor {
     }
 
     fn initiate_connection(&mut self) -> bool {
-        let peer = self.peer.read().unwrap();
+        let peer = self.peer.read().unwrap_or_else(|e| e.into_inner());
         let username = peer.username.clone();
         let host = peer.host.clone();
         let port = peer.port;
@@ -492,7 +502,7 @@ impl PeerActor {
 
         // Safety timeout in case the async connect task never responds
         if since.elapsed() > Duration::from_secs(10) {
-            let username = self.peer.read().unwrap().username.clone();
+            let username = self.peer.read().unwrap_or_else(|e| e.into_inner()).username.clone();
             error!("[peer:{}] Connection timeout after 10 seconds", username);
             self.disconnect_with_error(io::Error::new(
                 io::ErrorKind::TimedOut,
@@ -502,7 +512,7 @@ impl PeerActor {
     }
 
     fn on_connection_established(&mut self) {
-        let peer = self.peer.read().unwrap();
+        let peer = self.peer.read().unwrap_or_else(|e| e.into_inner());
         let username = peer.username.clone();
         let token = peer.token.unwrap_or(0);
         drop(peer);
@@ -566,7 +576,7 @@ impl Actor for PeerActor {
     }
 
     fn on_stop(&mut self) {
-        let username = self.peer.read().unwrap().username.clone();
+        let username = self.peer.read().unwrap_or_else(|e| e.into_inner()).username.clone();
         trace!("[peer:{}] actor stopping", username);
         self.disconnect();
     }

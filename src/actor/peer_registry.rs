@@ -53,14 +53,14 @@ impl PeerRegistry {
                 actor.set_self_handle(handle);
             });
 
-        let mut peers = self.peers.lock().unwrap();
+        let mut peers = self.peers.lock().unwrap_or_else(|e| e.into_inner());
         peers.insert(username.clone(), handle.clone());
 
         Ok(handle)
     }
 
     pub fn get_peer(&self, username: &str) -> Option<ActorHandle<PeerMessage>> {
-        let peers = self.peers.lock().unwrap();
+        let peers = self.peers.lock().unwrap_or_else(|e| e.into_inner());
         peers.get(username).cloned()
     }
 
@@ -68,7 +68,7 @@ impl PeerRegistry {
         &self,
         username: &str,
     ) -> Option<ActorHandle<PeerMessage>> {
-        let mut peers = self.peers.lock().unwrap();
+        let mut peers = self.peers.lock().unwrap_or_else(|e| e.into_inner());
         let handle = peers.remove(username);
 
         if handle.is_some() {
@@ -79,17 +79,17 @@ impl PeerRegistry {
     }
 
     pub fn get_all_usernames(&self) -> Vec<String> {
-        let peers = self.peers.lock().unwrap();
+        let peers = self.peers.lock().unwrap_or_else(|e| e.into_inner());
         peers.keys().cloned().collect()
     }
 
     pub fn count(&self) -> usize {
-        let peers = self.peers.lock().unwrap();
+        let peers = self.peers.lock().unwrap_or_else(|e| e.into_inner());
         peers.len()
     }
 
     pub fn contains(&self, username: &str) -> bool {
-        let peers = self.peers.lock().unwrap();
+        let peers = self.peers.lock().unwrap_or_else(|e| e.into_inner());
         peers.contains_key(username)
     }
 

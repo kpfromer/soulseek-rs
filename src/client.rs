@@ -177,7 +177,7 @@ impl Client {
     pub async fn connect(&mut self) {
         let (sender, message_reader) = mpsc::unbounded_channel::<ClientOperation>();
 
-        let mut ctx = self.context.write().unwrap();
+        let mut ctx = self.context.write().unwrap_or_else(|e| e.into_inner());
         ctx.sender = Some(sender.clone());
         let peer_registry = PeerRegistry::new(
             ctx.actor_system.clone(),
@@ -264,7 +264,7 @@ impl Client {
 
     #[allow(dead_code)]
     pub fn remove_peer(&self, username: &str) {
-        let context = self.context.read().unwrap();
+        let context = self.context.read().unwrap_or_else(|e| e.into_inner());
         if let Some(ref registry) = context.peer_registry
             && let Some(handle) = registry.remove_peer(username)
         {
@@ -289,13 +289,17 @@ impl Client {
             let token = u32::from_str_radix(&hash[0..5], 16)?;
 
             // Initialize new search with query string as key
-            self.context.write().unwrap().searches.insert(
-                query.to_string(),
-                Search {
-                    token,
-                    results: Vec::new(),
-                },
-            );
+            self.context
+                .write()
+                .map_err(|_| SoulseekRs::LockPoisoned)?
+                .searches
+                .insert(
+                    query.to_string(),
+                    Search {
+                        token,
+                        results: Vec::new(),
+                    },
+                );
 
             let _ = handle.send(ServerMessage::FileSearch {
                 token,
@@ -329,7 +333,7 @@ impl Client {
     pub fn get_search_results_count(&self, search_key: &str) -> usize {
         self.context
             .read()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .searches
             .get(search_key)
             .map(|s| s.results.len())
@@ -339,7 +343,7 @@ impl Client {
     pub fn get_search_results(&self, search_key: &str) -> Vec<SearchResult> {
         self.context
             .read()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .searches
             .get(search_key)
             .map(|s| s.results.clone())
@@ -355,11 +359,11 @@ impl Client {
     }
 
     pub fn get_all_searches(&self) -> HashMap<String, Search> {
-        self.context.read().unwrap().searches.clone()
+        self.context.read().unwrap_or_else(|e| e.into_inner()).searches.clone()
     }
 
     pub fn get_all_downloads(&self) -> Vec<Download> {
-        self.context.read().unwrap().get_downloads().clone()
+        self.context.read().unwrap_or_else(|e| e.into_inner()).get_downloads().clone()
     }
 
     pub fn download(
@@ -386,7 +390,10 @@ impl Client {
             sender: download_sender,
         };
 
-        let mut context = self.context.write().unwrap();
+        let mut context = self
+            .context
+            .write()
+            .map_err(|_| SoulseekRs::LockPoisoned)?;
         context.add_download(download.clone());
 
         let download_initiated = if let Some(ref registry) = context.peer_registry {
@@ -403,7 +410,7 @@ impl Client {
             let _ = download.sender.send(DownloadStatus::Failed);
             self.context
                 .write()
-                .unwrap()
+                .map_err(|_| SoulseekRs::LockPoisoned)?
                 .update_download_with_status(token, DownloadStatus::Failed);
         }
 
@@ -415,7 +422,7 @@ impl Client {
         username: &str,
         filename: Option<&str>,
     ) {
-        let context = client_context.read().unwrap();
+        let context = client_context.read().unwrap_or_else(|e| e.into_inner());
         let failed_downloads: Vec<_> = context
             .get_downloads()
             .iter()
@@ -430,7 +437,7 @@ impl Client {
         drop(context);
 
         failed_downloads.iter().for_each(|token| {
-            let mut context = client_context.write().unwrap();
+            let mut context = client_context.write().unwrap_or_else(|e| e.into_inner());
             context.update_download_with_status(*token, DownloadStatus::Failed);
             context.remove_download(*token);
         });
@@ -476,7 +483,8 @@ impl Client {
                     }
                     ClientOperation::SearchResult(search_result) => {
                         trace!("[client] SearchResult {:?}", search_result);
-                        let mut context = client_context.write().unwrap();
+                        let mut context =
+                            client_context.write().unwrap_or_else(|e| e.into_inner());
                         let result_token = search_result.token;
 
                         // Find the search with matching token
@@ -488,7 +496,8 @@ impl Client {
                         }
                     }
                     ClientOperation::PeerDisconnected(username, error) => {
-                        let context = client_context.read().unwrap();
+                        let context =
+                            client_context.read().unwrap_or_else(|e| e.into_inner());
                         if let Some(ref registry) = context.peer_registry
                             && let Some(handle) = registry.remove_peer(&username)
                         {
@@ -507,7 +516,8 @@ impl Client {
                     }
                     ClientOperation::DownloadFromPeer(token, peer, allowed) => {
                         let maybe_download = {
-                            let client_context = client_context.read().unwrap();
+                            let client_context =
+                                client_context.read().unwrap_or_else(|e| e.into_inner());
                             client_context.get_download_by_token(token).cloned()
                         };
                         let own_username = own_username.clone();
@@ -543,7 +553,7 @@ impl Client {
                                                         .send(DownloadStatus::Completed);
                                                     client_context_clone
                                                         .write()
-                                                        .unwrap()
+                                                        .unwrap_or_else(|e| e.into_inner())
                                                         .update_download_with_status(
                                                             download.token,
                                                             DownloadStatus::Completed,
@@ -559,7 +569,7 @@ impl Client {
                                                         .send(DownloadStatus::Failed);
                                                     client_context_clone
                                                         .write()
-                                                        .unwrap()
+                                                        .unwrap_or_else(|e| e.into_inner())
                                                         .update_download_with_status(
                                                             download.token,
                                                             DownloadStatus::Failed,
@@ -590,7 +600,7 @@ impl Client {
                     ClientOperation::NewPeer(new_peer) => {
                         let peer_exists = client_context
                             .read()
-                            .unwrap()
+                            .unwrap_or_else(|e| e.into_inner())
                             .peer_registry
                             .as_ref()
                             .map(|r| r.contains(&new_peer.username))
@@ -598,17 +608,28 @@ impl Client {
 
                         if peer_exists {
                             debug!("Already connected to {}", new_peer.username);
-                        } else if let Some(server_sender) =
-                            &client_context.read().unwrap().server_sender
+                        } else if let Some(server_sender) = &client_context
+                            .read()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .server_sender
                         {
                             if let Err(e) = server_sender
                                 .send(ServerMessage::GetPeerAddress(new_peer.username.clone()))
                             {
-                                warn!("[client] Failed to send GetPeerAddress for {}: {}", new_peer.username, e);
+                                warn!(
+                                    "[client] Failed to send GetPeerAddress for {}: {}",
+                                    new_peer.username, e
+                                );
                             }
                         }
 
-                        let addr = new_peer.tcp_stream.peer_addr().unwrap();
+                        let addr = match new_peer.tcp_stream.peer_addr() {
+                            Ok(addr) => addr,
+                            Err(e) => {
+                                error!("[client] Failed to get peer address: {}", e);
+                                continue;
+                            }
+                        };
                         let host = addr.ip().to_string();
                         let port: u32 = addr.port().into();
 
@@ -644,7 +665,7 @@ impl Client {
 
                         let peer_exists = client_context
                             .read()
-                            .unwrap()
+                            .unwrap_or_else(|e| e.into_inner())
                             .peer_registry
                             .as_ref()
                             .map(|r| r.contains(&username))
@@ -658,8 +679,8 @@ impl Client {
                                 port,
                                 None,
                                 0,
-                                obfuscation_type.try_into().unwrap(),
-                                obfuscated_port.try_into().unwrap(),
+                                obfuscation_type.try_into().unwrap_or(0),
+                                obfuscated_port.try_into().unwrap_or(0),
                             );
                             let client_context_clone = client_context.clone();
                             let own_username_clone = own_username.clone();
@@ -675,7 +696,8 @@ impl Client {
                         }
                     }
                     ClientOperation::UpdateDownloadTokens(transfer, username) => {
-                        let mut context = client_context.write().unwrap();
+                        let mut context =
+                            client_context.write().unwrap_or_else(|e| e.into_inner());
 
                         let download_to_update = context.get_downloads().iter().find_map(|d| {
                             if d.username == username && d.filename == transfer.filename {
@@ -711,7 +733,10 @@ impl Client {
                         );
                     }
                     ClientOperation::SetServerSender(sender) => {
-                        client_context.write().unwrap().server_sender = Some(sender);
+                        client_context
+                            .write()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .server_sender = Some(sender);
                         debug!("[client] Server sender initialized");
                     }
                 }
@@ -742,7 +767,7 @@ impl Client {
                     tokio::net::TcpStream::from_std(s).ok()
                 });
 
-                let context = client_context.read().unwrap();
+                let context = client_context.read().unwrap_or_else(|e| e.into_inner());
                 if let Some(ref registry) = context.peer_registry {
                     match registry.register_peer(peer_clone, tokio_stream, None) {
                         Ok(_) => (),
@@ -760,11 +785,18 @@ impl Client {
                     "[client] downloading from: {}, {:?}",
                     peer.username, peer.token
                 );
+                let token = match peer.token {
+                    Some(t) => t,
+                    None => {
+                        error!("[client] ConnectionType::F peer has no token");
+                        return;
+                    }
+                };
                 let download_peer = DownloadPeer::new(
                     peer.username,
                     peer.host,
                     peer.port,
-                    peer.token.unwrap(),
+                    token,
                     false,
                     own_username.clone(),
                 );
@@ -778,7 +810,7 @@ impl Client {
                         let _ = download.sender.send(DownloadStatus::Completed);
                         client_context
                             .write()
-                            .unwrap()
+                            .unwrap_or_else(|e| e.into_inner())
                             .update_download_with_status(download.token, DownloadStatus::Completed);
                     }
                     Err(e) => {
@@ -798,7 +830,7 @@ impl Client {
     ) {
         debug!("Piercing firewall for peer: {:?}", peer);
 
-        let context = client_context.read().unwrap();
+        let context = client_context.read().unwrap_or_else(|e| e.into_inner());
         if let Some(server_sender) = &context.server_sender {
             if let Some(token) = peer.token {
                 match server_sender.send(ServerMessage::PierceFirewall(token)) {

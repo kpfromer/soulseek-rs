@@ -1,4 +1,5 @@
 use crate::actor::server_actor::ServerMessage;
+use crate::error;
 use crate::message::{Message, MessageHandler};
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -24,14 +25,14 @@ impl MessageHandler<ServerMessage> for GetPeerAddressHandler {
         let obfuscated_port = message.read_int32() as u16;
         println!("GetPeerAddressHandler: {:?}", username); // Debug print
 
-        sender
-            .send(ServerMessage::GetPeerAddressResponse {
-                username,
-                host,
-                port,
-                obfuscation_type,
-                obfuscated_port,
-            })
-            .unwrap();
+        if let Err(e) = sender.send(ServerMessage::GetPeerAddressResponse {
+            username,
+            host,
+            port,
+            obfuscation_type,
+            obfuscated_port,
+        }) {
+            error!("[get_peer_address] Failed to send GetPeerAddressResponse: {}", e);
+        }
     }
 }

@@ -1,61 +1,34 @@
-use std::{error::Error, fmt};
+use thiserror::Error;
 
 /// Custom error type for the Soulseek download library
-#[derive(Debug)]
+#[derive(Error, Debug)]
 pub enum SoulseekRs {
-    NetworkError(std::io::Error),
+    #[error("Network error: {0}")]
+    NetworkError(#[from] std::io::Error),
     /// Authentication failed during login
+    #[error("Authentication failed")]
     AuthenticationFailed,
     /// Error parsing messages or data
+    #[error("Parse error: {0}")]
     ParseError(String),
     /// Operation timed out
+    #[error("Operation timed out")]
     Timeout,
     /// Connection was closed unexpectedly
+    #[error("Connection closed")]
     ConnectionClosed,
     /// Invalid message format or content
+    #[error("Invalid message: {0}")]
     InvalidMessage(String),
     /// Server not connected
+    #[error("Not connected to server")]
     NotConnected,
     /// Compression/decompression error
+    #[error("Compression error: {0}")]
     CompressionError(String),
-}
-
-impl fmt::Display for SoulseekRs {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            SoulseekRs::NetworkError(err) => {
-                write!(f, "Network error: {}", err)
-            }
-            SoulseekRs::AuthenticationFailed => {
-                write!(f, "Authentication failed")
-            }
-            SoulseekRs::ParseError(msg) => write!(f, "Parse error: {}", msg),
-            SoulseekRs::Timeout => write!(f, "Operation timed out"),
-            SoulseekRs::ConnectionClosed => write!(f, "Connection closed"),
-            SoulseekRs::InvalidMessage(msg) => {
-                write!(f, "Invalid message: {}", msg)
-            }
-            SoulseekRs::NotConnected => write!(f, "Not connected to server"),
-            SoulseekRs::CompressionError(msg) => {
-                write!(f, "Compression error: {}", msg)
-            }
-        }
-    }
-}
-
-impl Error for SoulseekRs {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            SoulseekRs::NetworkError(err) => Some(err),
-            _ => None,
-        }
-    }
-}
-
-impl From<std::io::Error> for SoulseekRs {
-    fn from(err: std::io::Error) -> Self {
-        SoulseekRs::NetworkError(err)
-    }
+    /// Lock was poisoned
+    #[error("Lock poisoned")]
+    LockPoisoned,
 }
 
 impl From<std::num::ParseIntError> for SoulseekRs {
