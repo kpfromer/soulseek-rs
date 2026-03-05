@@ -5,6 +5,7 @@ pub mod dispatcher;
 pub mod error;
 pub mod message;
 pub mod peer;
+pub mod search_rate_limiter;
 pub mod types;
 #[macro_use]
 pub mod utils;
@@ -12,9 +13,7 @@ pub mod utils;
 // Prelude module for commonly used items
 pub mod prelude {
     pub use crate::actor::server_actor::PeerAddress;
-    pub use crate::types::{
-        DownloadStatus, File, Search, SearchResult, Transfer,
-    };
+    pub use crate::types::{DownloadStatus, File, Search, SearchResult, Transfer};
     pub use crate::{debug, error, info, trace, warn};
 }
 

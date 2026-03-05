@@ -1,0 +1,945 @@
+use crate::actor::server_actor::{ServerActor, ServerMessage};
+use crate::search_rate_limiter::SlidingRateLimiter;
+use crate::types::DownloadStatus;
+use crate::utils::logger;
+use crate::{
+    Transfer,
+    actor::{ActorSystem, peer_registry::PeerRegistry},
+    error::{Result, SoulseekRs},
+    peer::{ConnectionType, DownloadPeer, NewPeer, Peer, listen::Listen},
+    types::{Download, Search, SearchResult},
+    utils::md5,
+};
+use crate::{debug, error, info, trace, warn};
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+use std::{
+    collections::HashMap,
+    sync::{
+        RwLock,
+        atomic::{AtomicBool, Ordering},
+    },
+};
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use tokio_util::sync::CancellationToken;
+
+mod context;
+mod inner;
+pub(super) mod operation;
+mod settings;
+pub(super) mod state_monitor;
+
+pub use context::ClientContext;
+pub use inner::{ActiveConnection, ClientInner, ClientState, PendingDownload};
+pub use operation::ClientOperation;
+pub use settings::*;
+use state_monitor::{WorkerEvent, state_monitor};
+
+// ── Private types ──────────────────────────────────────────────────────────────
+
+struct DownloadConcurrencyLimiter {
+    max_concurrent: u32,
+    active: u32,
+    queue: VecDeque<PendingDownload>,
+}
+
+impl DownloadConcurrencyLimiter {
+    fn new(max_concurrent: u32) -> Self {
+        Self {
+            max_concurrent,
+            active: 0,
+            queue: VecDeque::new(),
+        }
+    }
+}
+
+// ── ConnectedWorker ────────────────────────────────────────────────────────────
+
+/// Owns the incoming-operations loop for a live connection.
+/// Handles all `ClientOperation` messages from actors (server, peers).
+/// State-transition events are forwarded to `state_monitor` via `event_tx`.
+struct ConnectedWorker {
+    own_username: String,
+    op_rx: UnboundedReceiver<ClientOperation>,
+    event_tx: UnboundedSender<WorkerEvent>,
+    context: Arc<RwLock<ClientContext>>,
+    cancellation_token: CancellationToken,
+}
+
+impl ConnectedWorker {
+    async fn run(mut self) {
+        loop {
+            tokio::select! {
+                _ = self.cancellation_token.cancelled() => {
+                    trace!("[worker] Shutdown signal received");
+                    break;
+                }
+                op = self.op_rx.recv() => {
+                    match op {
+                        Some(op) => self.handle_operation(op).await,
+                        None => {
+                            error!("[worker] Channel closed");
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    async fn handle_operation(&mut self, op: ClientOperation) {
+        match op {
+            ClientOperation::ServerDisconnected => {
+                if let Err(e) = self.event_tx.send(WorkerEvent::ServerDisconnected) {
+                    error!("[worker] Failed to forward ServerDisconnected: {}", e);
+                }
+            }
+            ClientOperation::LoginSucceeded => {
+                if let Err(e) = self.event_tx.send(WorkerEvent::LoginSucceeded) {
+                    error!("[worker] Failed to forward LoginSucceeded: {}", e);
+                }
+            }
+            ClientOperation::DownloadSlotFreed => {
+                if let Err(e) = self.event_tx.send(WorkerEvent::DownloadSlotFreed) {
+                    error!("[worker] Failed to forward DownloadSlotFreed: {}", e);
+                }
+            }
+            ClientOperation::ConnectToPeer(peer) => {
+                let context = self.context.clone();
+                let own_username = self.own_username.clone();
+                tokio::spawn(async move {
+                    Self::connect_to_peer(peer, context, own_username, None);
+                });
+            }
+            ClientOperation::SearchResult(search_result) => {
+                trace!("[worker] SearchResult {:?}", search_result);
+                let mut context = self.context.write().unwrap_or_else(|e| e.into_inner());
+                let result_token = search_result.token;
+                for search in context.searches.values_mut() {
+                    if search.token == result_token {
+                        search.results.push(search_result);
+                        break;
+                    }
+                }
+            }
+            ClientOperation::PeerDisconnected(username, maybe_error) => {
+                {
+                    let context = self.context.read().unwrap_or_else(|e| e.into_inner());
+                    if let Some(ref registry) = context.peer_registry
+                        && let Some(handle) = registry.remove_peer(&username)
+                    {
+                        let _ = handle.stop();
+                    }
+                }
+                if let Some(error) = maybe_error {
+                    warn!(
+                        "[worker] Peer {} disconnected with error: {:?}",
+                        username, error
+                    );
+                    Self::process_failed_uploads(self.context.clone(), &username, None);
+                }
+            }
+            ClientOperation::PierceFireWall(peer) => {
+                Self::pierce_firewall(peer, self.context.clone(), self.own_username.clone());
+            }
+            ClientOperation::DownloadFromPeer(token, peer, allowed) => {
+                let maybe_download = {
+                    let ctx = self.context.read().unwrap_or_else(|e| e.into_inner());
+                    ctx.get_download_by_token(token).cloned()
+                };
+                let own_username = self.own_username.clone();
+                let context = self.context.clone();
+
+                trace!(
+                    "[worker] DownloadFromPeer token: {} peer: {:?}",
+                    token, peer
+                );
+
+                match maybe_download {
+                    Some(download) => {
+                        tokio::task::spawn_blocking(move || {
+                            let download_peer = DownloadPeer::new(
+                                download.username.clone(),
+                                peer.host.clone(),
+                                peer.port,
+                                token,
+                                allowed,
+                                own_username,
+                            );
+                            let filename: Option<&str> = download.filename.split('\\').next_back();
+                            match filename {
+                                Some(filename) => {
+                                    match download_peer.download_file(
+                                        context.clone(),
+                                        Some(download.clone()),
+                                        None,
+                                    ) {
+                                        Ok((download, filename)) => {
+                                            let _ = download.sender.send(DownloadStatus::Completed);
+                                            context
+                                                .write()
+                                                .unwrap_or_else(|e| e.into_inner())
+                                                .update_download_with_status(
+                                                    download.token,
+                                                    DownloadStatus::Completed,
+                                                );
+                                            info!(
+                                                "Successfully downloaded {} bytes to {}",
+                                                download.size, filename
+                                            );
+                                        }
+                                        Err(e) => {
+                                            let _ = download.sender.send(DownloadStatus::Failed);
+                                            context
+                                                .write()
+                                                .unwrap_or_else(|e| e.into_inner())
+                                                .update_download_with_status(
+                                                    download.token,
+                                                    DownloadStatus::Failed,
+                                                );
+                                            error!(
+                                                "Failed to download file '{}' from {}:{} (token: {}) - Error: {}",
+                                                filename, peer.host, peer.port, download.token, e
+                                            );
+                                        }
+                                    }
+                                }
+                                None => error!(
+                                    "Cant find filename to save download: {:?}",
+                                    download.filename
+                                ),
+                            }
+
+                            // Signal download slot freed (for concurrency limiter)
+                            if let Ok(ctx) = context.read() {
+                                if let Some(ref sender) = ctx.sender {
+                                    let _ = sender.send(ClientOperation::DownloadSlotFreed);
+                                }
+                            }
+                        });
+                    }
+                    None => {
+                        error!("Can't find download with token {:?}", token);
+                    }
+                }
+            }
+            ClientOperation::NewPeer(new_peer) => {
+                let peer_exists = self
+                    .context
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .peer_registry
+                    .as_ref()
+                    .map(|r| r.contains(&new_peer.username))
+                    .unwrap_or(false);
+
+                if peer_exists {
+                    debug!("Already connected to {}", new_peer.username);
+                } else {
+                    let ctx = self.context.read().unwrap_or_else(|e| e.into_inner());
+                    if let Some(ref server_sender) = ctx.server_sender {
+                        server_sender
+                            .send(ServerMessage::GetPeerAddress(new_peer.username.clone()))
+                            .unwrap_or_else(|e| {
+                                error!("[worker] Failed to send GetPeerAddress: {}", e)
+                            });
+                    }
+                }
+
+                let addr = new_peer.tcp_stream.peer_addr().unwrap();
+                let host = addr.ip().to_string();
+                let port: u32 = addr.port().into();
+
+                let peer = Peer {
+                    username: new_peer.username.clone(),
+                    connection_type: new_peer.connection_type,
+                    host,
+                    port,
+                    token: Some(new_peer.token),
+                    privileged: None,
+                    obfuscated_port: None,
+                    unknown: None,
+                };
+
+                Self::connect_to_peer(
+                    peer,
+                    self.context.clone(),
+                    self.own_username.clone(),
+                    Some(new_peer.tcp_stream),
+                );
+            }
+            ClientOperation::GetPeerAddressResponse {
+                username,
+                host,
+                port,
+                obfuscation_type,
+                obfuscated_port,
+            } => {
+                debug!(
+                    "Received peer address for {}: {}:{} (obf_type: {}, obf_port: {})",
+                    username, host, port, obfuscation_type, obfuscated_port
+                );
+
+                let peer_exists = self
+                    .context
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .peer_registry
+                    .as_ref()
+                    .map(|r| r.contains(&username))
+                    .unwrap_or(false);
+
+                if !peer_exists {
+                    let peer = Peer::new(
+                        username,
+                        ConnectionType::P,
+                        host,
+                        port,
+                        None,
+                        0,
+                        obfuscation_type.try_into().unwrap(),
+                        obfuscated_port.try_into().unwrap(),
+                    );
+                    let context = self.context.clone();
+                    let own_username = self.own_username.clone();
+                    tokio::spawn(async move {
+                        Self::connect_to_peer(peer, context, own_username, None);
+                    });
+                }
+            }
+            ClientOperation::UpdateDownloadTokens(transfer, username) => {
+                let mut context = self.context.write().unwrap_or_else(|e| e.into_inner());
+
+                let download_to_update = context.get_downloads().iter().find_map(|d| {
+                    if d.username == username && d.filename == transfer.filename {
+                        Some((d.token, d.clone()))
+                    } else {
+                        None
+                    }
+                });
+
+                if let Some((old_token, download)) = download_to_update {
+                    trace!(
+                        "[worker] UpdateDownloadTokens found {old_token}, transfer: {:?}",
+                        transfer
+                    );
+                    context.add_download(Download {
+                        username: username.clone(),
+                        filename: transfer.filename,
+                        token: transfer.token,
+                        size: transfer.size,
+                        download_directory: download.download_directory,
+                        status: download.status.clone(),
+                        sender: download.sender.clone(),
+                    });
+                    context.remove_download(old_token);
+                }
+            }
+            ClientOperation::UploadFailed(username, filename) => {
+                Self::process_failed_uploads(self.context.clone(), &username, Some(&filename));
+            }
+            ClientOperation::SetServerSender(sender) => {
+                self.context
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .server_sender = Some(sender);
+                debug!("[worker] Server sender initialized");
+            }
+        }
+    }
+
+    fn process_failed_uploads(
+        context: Arc<RwLock<ClientContext>>,
+        username: &str,
+        filename: Option<&str>,
+    ) {
+        let failed_tokens: Vec<_> = {
+            let ctx = context.read().unwrap_or_else(|e| e.into_inner());
+            ctx.get_downloads()
+                .iter()
+                .filter(|d| d.username == username && filename.is_none_or(|f| d.filename == *f))
+                .map(|d| {
+                    let _ = d.sender.send(DownloadStatus::Failed);
+                    d.token
+                })
+                .collect()
+        };
+
+        for token in failed_tokens {
+            let mut ctx = context.write().unwrap_or_else(|e| e.into_inner());
+            ctx.update_download_with_status(token, DownloadStatus::Failed);
+            ctx.remove_download(token);
+        }
+    }
+
+    fn connect_to_peer(
+        peer: Peer,
+        context: Arc<RwLock<ClientContext>>,
+        own_username: String,
+        stream: Option<std::net::TcpStream>,
+    ) {
+        let peer_clone = peer.clone();
+        trace!(
+            "[worker] connecting to {}, with connection_type: {}, and token {:?}",
+            peer.username, peer.connection_type, peer.token
+        );
+        match peer.connection_type {
+            ConnectionType::P => {
+                let username = peer.username.clone();
+                let tokio_stream = stream.and_then(|s| {
+                    s.set_nonblocking(true).ok();
+                    tokio::net::TcpStream::from_std(s).ok()
+                });
+                let ctx = context.read().unwrap_or_else(|e| e.into_inner());
+                if let Some(ref registry) = ctx.peer_registry {
+                    match registry.register_peer(peer_clone, tokio_stream, None) {
+                        Ok(_) => (),
+                        Err(e) => {
+                            trace!("Failed to spawn peer actor for {:?}: {:?}", username, e);
+                        }
+                    }
+                } else {
+                    trace!("PeerRegistry not initialized");
+                }
+            }
+            ConnectionType::F => {
+                trace!(
+                    "[worker] downloading from: {}, {:?}",
+                    peer.username, peer.token
+                );
+                let download_peer = DownloadPeer::new(
+                    peer.username,
+                    peer.host,
+                    peer.port,
+                    peer.token.unwrap(),
+                    false,
+                    own_username,
+                );
+                match download_peer.download_file(context.clone(), None, stream) {
+                    Ok((download, filename)) => {
+                        trace!("[worker] downloaded {} bytes {:?}", filename, download.size);
+                        let _ = download.sender.send(DownloadStatus::Completed);
+                        context
+                            .write()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .update_download_with_status(download.token, DownloadStatus::Completed);
+                    }
+                    Err(e) => {
+                        trace!("[worker] failed to download: {}", e);
+                    }
+                }
+                // Signal download slot freed
+                if let Ok(ctx) = context.read() {
+                    if let Some(ref sender) = ctx.sender {
+                        let _ = sender.send(ClientOperation::DownloadSlotFreed);
+                    }
+                }
+            }
+            ConnectionType::D => {
+                error!("ConnectionType::D not implemented")
+            }
+        }
+    }
+
+    fn pierce_firewall(peer: Peer, context: Arc<RwLock<ClientContext>>, own_username: String) {
+        debug!("Piercing firewall for peer: {:?}", peer);
+        {
+            let ctx = context.read().unwrap_or_else(|e| e.into_inner());
+            if let Some(ref server_sender) = ctx.server_sender {
+                if let Some(token) = peer.token {
+                    if let Err(e) = server_sender.send(ServerMessage::PierceFirewall(token)) {
+                        error!("Failed to send PierceFirewall message: {}", e);
+                    }
+                } else {
+                    error!("No token available for PierceFirewall");
+                }
+            } else {
+                error!("No server sender available for PierceFirewall");
+            }
+        }
+        Self::connect_to_peer(peer, context, own_username, None);
+    }
+}
+
+// ── Client (public API) ────────────────────────────────────────────────────────
+
+pub struct Client {
+    settings: ClientSettings,
+    /// Single lock for all mutable state.
+    inner: Arc<Mutex<ClientInner>>,
+}
+
+impl Drop for Client {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+impl Client {
+    pub fn new(
+        username: impl Into<PlainTextUnencrypted>,
+        password: impl Into<PlainTextUnencrypted>,
+    ) -> Self {
+        Self::with_settings(ClientSettings::new(username, password))
+    }
+
+    pub fn with_settings(settings: ClientSettings) -> Self {
+        logger::init();
+
+        let search_limiter = settings
+            .search_rate_limit_settings
+            .as_ref()
+            .map(|s| SlidingRateLimiter::new(s.searches, s.per_period));
+
+        let download_limiter = settings
+            .download_rate_limit_settings
+            .as_ref()
+            .map(|s| DownloadConcurrencyLimiter::new(s.concurrent_downloads));
+
+        Self {
+            settings,
+            inner: Arc::new(Mutex::new(ClientInner {
+                state: ClientState::Disconnected,
+                active: None,
+                pending_downloads: VecDeque::new(),
+                search_limiter,
+                download_limiter,
+            })),
+        }
+    }
+
+    /// Shutdown all spawned tasks (actors, listener, worker).
+    /// Called automatically on drop.
+    pub fn shutdown(&self) {
+        let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(ref active) = guard.active {
+            if let Ok(ctx) = active.context.read() {
+                ctx.actor_system.shutdown();
+            }
+        }
+    }
+
+    /// Connect to the Soulseek server and login. Blocks until login succeeds or fails.
+    pub async fn connect(&mut self) -> Result<()> {
+        {
+            let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            if matches!(guard.state, ClientState::Connected) {
+                return Ok(());
+            }
+        }
+
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).state = ClientState::Connecting;
+
+        let username = self.settings.username.0.clone();
+        let password = self.settings.password.0.clone();
+
+        let (op_tx, op_rx) = mpsc::unbounded_channel::<ClientOperation>();
+        let (event_tx, event_rx) = mpsc::unbounded_channel::<WorkerEvent>();
+
+        // Build context
+        let context = Arc::new(RwLock::new(ClientContext::new()));
+        {
+            let mut ctx = context.write().unwrap_or_else(|e| e.into_inner());
+            ctx.sender = Some(op_tx.clone());
+            let peer_registry =
+                PeerRegistry::new(ctx.actor_system.clone(), op_tx.clone(), username.clone());
+            ctx.peer_registry = Some(peer_registry);
+        }
+
+        // Spawn ServerActor
+        let server_actor = ServerActor::new(
+            self.settings.server_address.clone(),
+            op_tx.clone(),
+            self.settings.listen_port,
+            self.settings.enable_listen,
+            self.settings.tcp_keepalive_settings.clone(),
+            self.settings.reconnect_settings.clone(),
+        );
+
+        let actor_system = context
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .actor_system
+            .clone();
+
+        let server_handle = actor_system.spawn_with_handle(server_actor, |actor, handle| {
+            actor.set_self_handle(handle);
+        });
+
+        // Store active connection
+        {
+            let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            guard.active = Some(ActiveConnection {
+                server_handle: server_handle.clone(),
+                context: context.clone(),
+            });
+        }
+
+        // Send Login — queued by ServerActor until TCP is ready
+        let (login_tx, login_rx) = tokio::sync::oneshot::channel();
+        let _ = server_handle.send(ServerMessage::Login {
+            username: username.clone(),
+            password: password.clone(),
+            response: login_tx,
+        });
+
+        let cancellation_token = actor_system.cancellation_token().clone();
+
+        // Spawn listener task
+        if self.settings.enable_listen {
+            let listen_port = self.settings.listen_port;
+            let client_sender = op_tx.clone();
+            let context_clone = context.clone();
+            let own_username = username.clone();
+            let token = cancellation_token.clone();
+
+            tokio::spawn(async move {
+                tokio::select! {
+                    _ = token.cancelled() => {
+                        trace!("[listener] Shutdown signal received");
+                    }
+                    result = Listen::start(
+                        listen_port,
+                        client_sender,
+                        context_clone,
+                        own_username,
+                    ) => {
+                        match result {
+                            Ok(_) => info!("[listener] Listener started successfully"),
+                            Err(e) => error!("[listener] Failed to start listener: {}", e),
+                        }
+                    }
+                }
+            });
+        }
+
+        // Spawn ConnectedWorker
+        let worker = ConnectedWorker {
+            own_username: username.clone(),
+            op_rx,
+            event_tx,
+            context: context.clone(),
+            cancellation_token: cancellation_token.clone(),
+        };
+        tokio::spawn(async move { worker.run().await });
+
+        // Spawn state_monitor
+        let inner_clone = self.inner.clone();
+        tokio::spawn(async move { state_monitor(event_rx, inner_clone).await });
+
+        // Await login result
+        match login_rx.await {
+            Ok(Ok(true)) => {
+                self.inner.lock().unwrap_or_else(|e| e.into_inner()).state = ClientState::Connected;
+                Ok(())
+            }
+            Ok(Err(e)) => Err(e),
+            Ok(Ok(false)) => Err(SoulseekRs::AuthenticationFailed),
+            Err(_) => Err(SoulseekRs::Timeout),
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn remove_peer(&self, username: &str) {
+        let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(ref active) = guard.active {
+            let ctx = active.context.read().unwrap_or_else(|e| e.into_inner());
+            if let Some(ref registry) = ctx.peer_registry
+                && let Some(handle) = registry.remove_peer(username)
+            {
+                let _ = handle.stop();
+            }
+        }
+    }
+
+    pub async fn search(&self, query: &str, timeout: Duration) -> Result<Vec<SearchResult>> {
+        self.search_with_cancel(query, timeout, None).await
+    }
+
+    async fn wait_for_search_rate_limit(&self) -> Result<()> {
+        let wait = {
+            if let Some(ref mut lim) = self
+                .inner
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .search_limiter
+            {
+                Some(lim.clone().acquire())
+            } else {
+                None
+            }
+        };
+        if let Some(wait) = wait {
+            wait.await;
+        }
+        Ok(())
+    }
+
+    pub async fn search_with_cancel(
+        &self,
+        query: &str,
+        timeout: Duration,
+        cancel_flag: Option<Arc<AtomicBool>>,
+    ) -> Result<Vec<SearchResult>> {
+        info!("Searching for {}", query);
+
+        // Record search and get connection handles
+        let (server_handle, context) = {
+            self.wait_for_search_rate_limit().await?;
+            let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            match guard.active.as_ref() {
+                Some(active) => (active.server_handle.clone(), active.context.clone()),
+                None => return Err(SoulseekRs::NotConnected),
+            }
+        };
+
+        let hash = md5::md5(query);
+        let token = u32::from_str_radix(&hash[0..5], 16)?;
+
+        // Insert search entry and send FileSearch
+        context
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .searches
+            .insert(
+                query.to_string(),
+                Search {
+                    token,
+                    results: Vec::new(),
+                },
+            );
+
+        let _ = server_handle.send(ServerMessage::FileSearch {
+            token,
+            query: query.to_string(),
+        });
+
+        // Poll until timeout or cancel
+        let start = Instant::now();
+        loop {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+
+            if let Some(ref flag) = cancel_flag
+                && flag.load(Ordering::Relaxed)
+            {
+                info!("Search cancelled by user");
+                break;
+            }
+
+            if start.elapsed() >= timeout {
+                break;
+            }
+        }
+
+        Ok(self.get_search_results(query))
+    }
+
+    pub fn get_search_results_count(&self, search_key: &str) -> usize {
+        let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(ref active) = guard.active {
+            active
+                .context
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .searches
+                .get(search_key)
+                .map(|s| s.results.len())
+                .unwrap_or(0)
+        } else {
+            0
+        }
+    }
+
+    pub fn get_search_results(&self, search_key: &str) -> Vec<SearchResult> {
+        let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(ref active) = guard.active {
+            active
+                .context
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .searches
+                .get(search_key)
+                .map(|s| s.results.clone())
+                .unwrap_or_default()
+        } else {
+            vec![]
+        }
+    }
+
+    /// Non-blocking variant that returns None if the lock is unavailable.
+    pub fn try_get_search_results(&self, search_key: &str) -> Option<Vec<SearchResult>> {
+        let guard = self.inner.try_lock().ok()?;
+        let active = guard.active.as_ref()?;
+        active
+            .context
+            .try_read()
+            .ok()
+            .and_then(|ctx| ctx.searches.get(search_key).map(|s| s.results.clone()))
+    }
+
+    pub fn get_all_searches(&self) -> HashMap<String, Search> {
+        let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(ref active) = guard.active {
+            active
+                .context
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .searches
+                .clone()
+        } else {
+            HashMap::new()
+        }
+    }
+
+    pub fn get_all_downloads(&self) -> Vec<Download> {
+        let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(ref active) = guard.active {
+            active
+                .context
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .get_downloads()
+                .clone()
+        } else {
+            vec![]
+        }
+    }
+
+    pub fn download(
+        &self,
+        filename: String,
+        username: String,
+        size: u64,
+        download_directory: String,
+    ) -> Result<(Download, UnboundedReceiver<DownloadStatus>)> {
+        info!("[client] Downloading {} from {}", filename, username);
+
+        let hash = md5::md5(&filename);
+        let token = u32::from_str_radix(&hash[0..5], 16)?;
+
+        let (download_sender, download_receiver) = mpsc::unbounded_channel::<DownloadStatus>();
+
+        let download = Download {
+            username: username.clone(),
+            filename: filename.clone(),
+            token,
+            size,
+            download_directory: download_directory.clone(),
+            status: DownloadStatus::Queued,
+            sender: download_sender.clone(),
+        };
+
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let is_connected = matches!(guard.state, ClientState::Connected);
+
+        // Extract context Arc before needing to borrow guard for download_limiter
+        let context_arc = guard.active.as_ref().map(|a| a.context.clone());
+
+        if let Some(context_arc) = context_arc {
+            // Add download to context regardless of connection state
+            context_arc
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .add_download(download.clone());
+
+            if is_connected {
+                let mut ctx = context_arc.write().unwrap_or_else(|e| e.into_inner());
+                let initiated = if let Some(ref registry) = ctx.peer_registry {
+                    if let Some(ref mut lim) = guard.download_limiter {
+                        if lim.active < lim.max_concurrent {
+                            lim.active += 1;
+                            registry
+                                .queue_upload(&username, download.filename.clone())
+                                .is_ok()
+                        } else {
+                            lim.queue.push_back(PendingDownload {
+                                filename: filename.clone(),
+                                username: username.clone(),
+                                size,
+                                download_directory,
+                                token,
+                                status_sender: download_sender,
+                            });
+                            true
+                        }
+                    } else {
+                        registry
+                            .queue_upload(&username, download.filename.clone())
+                            .is_ok()
+                    }
+                } else {
+                    false
+                };
+
+                if !initiated {
+                    let _ = download.sender.send(DownloadStatus::Failed);
+                    ctx.update_download_with_status(token, DownloadStatus::Failed);
+                }
+            } else {
+                guard.pending_downloads.push_back(PendingDownload {
+                    filename: filename.clone(),
+                    username: username.clone(),
+                    size,
+                    download_directory,
+                    token,
+                    status_sender: download_sender,
+                });
+            }
+        } else {
+            // No active connection yet — queue for replay after first connect
+            guard.pending_downloads.push_back(PendingDownload {
+                filename: filename.clone(),
+                username: username.clone(),
+                size,
+                download_directory,
+                token,
+                status_sender: download_sender,
+            });
+        }
+
+        Ok((download, download_receiver))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_client_context_downloads() {
+        let mut context = ClientContext::new();
+        let token = 123;
+        let new_token = 1234;
+        let download = Download {
+            username: "test".to_string(),
+            filename: "test.txt".to_string(),
+            token,
+            size: 100,
+            download_directory: "test".to_string(),
+            status: DownloadStatus::Queued,
+            sender: mpsc::unbounded_channel().0,
+        };
+        context.add_download(download);
+        assert!(context.get_download_by_token(123).is_some());
+        assert_eq!(context.get_download_tokens(), vec![123]);
+        assert_eq!(context.get_downloads().len(), 1);
+        if let Some(download) = context.get_download_by_token_mut(token) {
+            assert_eq!(download.token, token);
+            download.token = new_token
+        }
+        assert!(context.get_download_by_token(new_token).is_some());
+        assert_eq!(context.get_download_tokens(), vec![new_token]);
+        context.remove_download(new_token);
+        assert_eq!(context.get_downloads().len(), 0);
+        assert!(context.get_download_by_token(1234).is_none());
+    }
+
+    #[test]
+    fn test_client_settings_default_compiles() {
+        let settings = ClientSettings::default();
+        assert_eq!(settings.listen_port, 2234);
+        assert!(settings.search_rate_limit_settings.is_some());
+        assert!(settings.download_rate_limit_settings.is_some());
+    }
+}

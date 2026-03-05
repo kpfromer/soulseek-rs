@@ -11,7 +11,7 @@ name = "soulseek_rs"
 path = "src/lib.rs"
 
 [dependencies]
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["full", "test-util"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 bytes = "1"
 thiserror = "2.0.18"
