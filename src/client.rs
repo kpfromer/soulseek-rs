@@ -25,6 +25,45 @@ use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use crate::{debug, error, info, trace, warn};
 const DEFALT_LISTEN_PORT: u32 = 2234;
 
+/// TCP keepalive settings.
+#[derive(Debug, Clone)]
+pub enum KeepAliveSettings {
+    Enabled {
+        /// The idle time before sending a keepalive packet.
+        idle: Duration,
+        /// The interval between keepalive packets.
+        interval: Duration,
+        /// The number of keepalive packets to send before considering the connection dead.
+        count: u32,
+        /// The maximum idle time before considering the connection dead.
+        max_idle: Duration,
+    },
+    Disabled,
+}
+
+#[derive(Debug, Clone)]
+pub enum ReconnectSettings {
+    Disabled,
+    EnabledExponentialBackoff {
+        min_delay: Duration,
+        max_delay: Duration,
+        /// The maximum number of attempts to reconnect.
+        /// If None, the reconnect will continue indefinitely.
+        max_attempts: Option<u32>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct SearchRateLimitSettings {
+    searches: u32,
+    per_period: Duration,
+}
+
+#[derive(Debug, Clone)]
+pub struct DownloadRateLimitSettings {
+    concurrent_downloads: u32,
+}
+
 /// A wrapper for a string that is plain text and is sent over the network via an unencrypted channel.
 /// Soulseek uses an unencrypted channel for the username and password.
 #[derive(Debug, Clone)]
@@ -37,7 +76,56 @@ pub struct ClientSettings {
     pub server_address: PeerAddress,
     pub enable_listen: bool,
     pub listen_port: u32,
+    // TODO: timeout settings
+    // pub search_timeout: Duration,
+    // pub download_timeout: Duration,
+    // pub upload_timeout: Duration,
+    // pub connect_timeout: Duration,
+    // pub disconnect_timeout: Duration,
+    // TODO: rate limiting settings
+    /// These are the settings for the TCP keepalive.
+    /// This only affects the connections to the Soulseek server.
+    /// Peer connections are not affected by this because
+    /// - they are intentionally short lived.
+    /// - they are torn down after use.
+    tcp_keepalive_settings: KeepAliveSettings,
+
+    /// These settings affect how to reconnect to the Soulseek server in case of a connection failure.
+    reconnect_settings: ReconnectSettings,
+
+    /// Controls the rate limiting of searches to prevent abuse, and being banned.
+    search_rate_limit_settings: Option<SearchRateLimitSettings>,
+    /// Controls the rate limiting of downloads to prevent abuse, and being banned.
+    download_rate_limit_settings: Option<DownloadRateLimitSettings>,
 }
+
+// TODO: `ClientActor` state machine
+// States:
+// - disconnected = not connected to server
+// - connecting = trying to connect to server
+// - connected = connected to server and can send and receive messages, do things
+// - error = something went horribly wrong and we can't recover, user needs to reconnect and report error
+// Events:
+// - connect = user wants to connect to server = set state to `connecting`, connect to server, once connected, set state to `connected`, on error, set state to `panic`
+//             this should handle retry logic
+// - disconnect = user wants to disconnect from server = drop `ConnectedActor` (implictly causing everything to be torn down, threads to stop, etc)
+// - search = user wants to search for files = delegate to `ConnectedActor```
+//            if we are not connected, run `connect` logic first, then delegate to `ConnectedActor` if connected
+// - download = user wants to download a file = delegate to `ConnectedActor`
+//            if we are not connected, run `connect` logic first, then delegate to `ConnectedActor` if connected
+// - panic = something went horribly wrong and we can't recover, set state to `error`
+
+// TODO: `ConnectedActor` actor
+// This actor is responsible for handling all the events, assuming we are connected to the server.
+// It will delegate to the appropriate actors for the events.
+//
+// Events:
+// - search = todo
+// - download = todo
+// - panic = bubble up to `ClientActor`
+// - disconnect = bubble up to `ClientActor`
+//
+// if dropped, mark cancel token to cancelled
 
 impl ClientSettings {
     pub fn new(
