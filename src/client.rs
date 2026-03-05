@@ -10,7 +10,8 @@ use crate::{
     types::{Download, Search, SearchResult},
     utils::md5,
 };
-use std::sync::Arc;
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::{
     collections::HashMap,
@@ -55,19 +56,37 @@ pub enum ReconnectSettings {
 
 #[derive(Debug, Clone)]
 pub struct SearchRateLimitSettings {
-    searches: u32,
-    per_period: Duration,
+    pub searches: u32,
+    pub per_period: Duration,
 }
 
 #[derive(Debug, Clone)]
 pub struct DownloadRateLimitSettings {
-    concurrent_downloads: u32,
+    pub concurrent_downloads: u32,
 }
 
 /// A wrapper for a string that is plain text and is sent over the network via an unencrypted channel.
 /// Soulseek uses an unencrypted channel for the username and password.
 #[derive(Debug, Clone)]
-pub struct PlainTextUnencrypted(String);
+pub struct PlainTextUnencrypted(pub String);
+
+impl PlainTextUnencrypted {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<&str> for PlainTextUnencrypted {
+    fn from(s: &str) -> Self {
+        PlainTextUnencrypted(s.to_string())
+    }
+}
+
+impl From<String> for PlainTextUnencrypted {
+    fn from(s: String) -> Self {
+        PlainTextUnencrypted(s)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct ClientSettings {
@@ -76,56 +95,16 @@ pub struct ClientSettings {
     pub server_address: PeerAddress,
     pub enable_listen: bool,
     pub listen_port: u32,
-    // TODO: timeout settings
-    // pub search_timeout: Duration,
-    // pub download_timeout: Duration,
-    // pub upload_timeout: Duration,
-    // pub connect_timeout: Duration,
-    // pub disconnect_timeout: Duration,
-    // TODO: rate limiting settings
     /// These are the settings for the TCP keepalive.
     /// This only affects the connections to the Soulseek server.
-    /// Peer connections are not affected by this because
-    /// - they are intentionally short lived.
-    /// - they are torn down after use.
-    tcp_keepalive_settings: KeepAliveSettings,
-
+    pub tcp_keepalive_settings: KeepAliveSettings,
     /// These settings affect how to reconnect to the Soulseek server in case of a connection failure.
-    reconnect_settings: ReconnectSettings,
-
+    pub reconnect_settings: ReconnectSettings,
     /// Controls the rate limiting of searches to prevent abuse, and being banned.
-    search_rate_limit_settings: Option<SearchRateLimitSettings>,
+    pub search_rate_limit_settings: Option<SearchRateLimitSettings>,
     /// Controls the rate limiting of downloads to prevent abuse, and being banned.
-    download_rate_limit_settings: Option<DownloadRateLimitSettings>,
+    pub download_rate_limit_settings: Option<DownloadRateLimitSettings>,
 }
-
-// TODO: `ClientActor` state machine
-// States:
-// - disconnected = not connected to server
-// - connecting = trying to connect to server
-// - connected = connected to server and can send and receive messages, do things
-// - error = something went horribly wrong and we can't recover, user needs to reconnect and report error
-// Events:
-// - connect = user wants to connect to server = set state to `connecting`, connect to server, once connected, set state to `connected`, on error, set state to `panic`
-//             this should handle retry logic
-// - disconnect = user wants to disconnect from server = drop `ConnectedActor` (implictly causing everything to be torn down, threads to stop, etc)
-// - search = user wants to search for files = delegate to `ConnectedActor```
-//            if we are not connected, run `connect` logic first, then delegate to `ConnectedActor` if connected
-// - download = user wants to download a file = delegate to `ConnectedActor`
-//            if we are not connected, run `connect` logic first, then delegate to `ConnectedActor` if connected
-// - panic = something went horribly wrong and we can't recover, set state to `error`
-
-// TODO: `ConnectedActor` actor
-// This actor is responsible for handling all the events, assuming we are connected to the server.
-// It will delegate to the appropriate actors for the events.
-//
-// Events:
-// - search = todo
-// - download = todo
-// - panic = bubble up to `ClientActor`
-// - disconnect = bubble up to `ClientActor`
-//
-// if dropped, mark cancel token to cancelled
 
 impl ClientSettings {
     pub fn new(
@@ -148,12 +127,105 @@ impl Default for ClientSettings {
             server_address: PeerAddress::new("server.slsknet.org".to_string(), 2416),
             enable_listen: true,
             listen_port: DEFALT_LISTEN_PORT,
+            tcp_keepalive_settings: KeepAliveSettings::Enabled {
+                idle: Duration::from_secs(10),
+                interval: Duration::from_secs(2),
+                count: 10,
+                max_idle: Duration::from_secs(30),
+            },
+            reconnect_settings: ReconnectSettings::EnabledExponentialBackoff {
+                min_delay: Duration::from_secs(1),
+                max_delay: Duration::from_secs(60),
+                max_attempts: None,
+            },
+            search_rate_limit_settings: Some(SearchRateLimitSettings {
+                searches: 34,
+                per_period: Duration::from_secs(220),
+            }),
+            download_rate_limit_settings: Some(DownloadRateLimitSettings {
+                concurrent_downloads: 2,
+            }),
+        }
+    }
+}
+
+enum ClientState {
+    Disconnected,
+    Connecting,
+    Connected,
+}
+
+#[allow(dead_code)]
+struct PendingDownload {
+    filename: String,
+    username: String,
+    size: u64,
+    download_directory: String,
+    token: u32,
+    status_sender: UnboundedSender<DownloadStatus>,
+}
+
+struct SearchRateLimiter {
+    limit: u32,
+    period: Duration,
+    issued_at: VecDeque<Instant>,
+}
+
+impl SearchRateLimiter {
+    fn new(limit: u32, period: Duration) -> Self {
+        Self {
+            limit,
+            period,
+            issued_at: VecDeque::new(),
+        }
+    }
+
+    /// Returns Some(wait_duration) if rate-limited, None if a search can proceed immediately.
+    fn wait_duration(&mut self) -> Option<Duration> {
+        let now = Instant::now();
+        // Evict entries older than the period
+        while let Some(&front) = self.issued_at.front() {
+            if now.duration_since(front) >= self.period {
+                self.issued_at.pop_front();
+            } else {
+                break;
+            }
+        }
+        if self.issued_at.len() >= self.limit as usize {
+            let oldest = *self.issued_at.front().unwrap();
+            let elapsed = now.duration_since(oldest);
+            if elapsed < self.period {
+                Some(self.period - elapsed)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+
+    fn record(&mut self) {
+        self.issued_at.push_back(Instant::now());
+    }
+}
+
+struct DownloadConcurrencyLimiter {
+    max_concurrent: u32,
+    active: u32,
+    queue: VecDeque<PendingDownload>,
+}
+
+impl DownloadConcurrencyLimiter {
+    fn new(max_concurrent: u32) -> Self {
+        Self {
+            max_concurrent,
+            active: 0,
+            queue: VecDeque::new(),
         }
     }
 }
 
 #[derive(Debug)]
-
 pub enum ClientOperation {
     NewPeer(NewPeer),
     ConnectToPeer(Peer),
@@ -171,27 +243,38 @@ pub enum ClientOperation {
     },
     UploadFailed(String, String),
     SetServerSender(UnboundedSender<ServerMessage>),
+    /// Server TCP connection was lost; reconnect will be handled by ServerActor.
+    ServerDisconnected,
+    /// (Re)login confirmed; replay pending downloads.
+    LoginSucceeded,
+    /// A download finished; dequeue next from concurrency limiter.
+    DownloadSlotFreed,
 }
+
 pub struct ClientContext {
     pub peer_registry: Option<PeerRegistry>,
-    sender: Option<UnboundedSender<ClientOperation>>,
+    pub(crate) sender: Option<UnboundedSender<ClientOperation>>,
     server_sender: Option<UnboundedSender<ServerMessage>>,
     searches: HashMap<String, Search>,
     downloads: Vec<Download>,
     actor_system: Arc<ActorSystem>,
 }
+
 impl Default for ClientContext {
     fn default() -> Self {
         Self::new()
     }
 }
+
 impl ClientContext {
     pub fn add_download(&mut self, download: Download) {
         self.downloads.push(download);
     }
+
     pub fn remove_download(&mut self, token: u32) {
         self.downloads.retain(|d| d.token != token);
     }
+
     pub fn get_download_by_token(&self, token: u32) -> Option<&Download> {
         self.downloads.iter().find(|d| d.token == token)
     }
@@ -199,9 +282,11 @@ impl ClientContext {
     pub fn get_download_by_token_mut(&mut self, token: u32) -> Option<&mut Download> {
         self.downloads.iter_mut().find(|d| d.token == token)
     }
+
     pub fn get_download_tokens(&self) -> Vec<u32> {
         self.downloads.iter().map(|d| d.token).collect()
     }
+
     pub fn get_downloads(&self) -> &Vec<Download> {
         &self.downloads
     }
@@ -228,14 +313,15 @@ impl ClientContext {
         }
     }
 }
+
 pub struct Client {
-    enable_listen: bool,
-    listen_port: u32,
-    address: PeerAddress,
-    username: String,
-    password: String,
-    server_handle: Option<ActorHandle<ServerMessage>>,
+    settings: ClientSettings,
+    state: Arc<Mutex<ClientState>>,
     context: Arc<RwLock<ClientContext>>,
+    server_handle: Option<ActorHandle<ServerMessage>>,
+    pending_downloads: Arc<Mutex<VecDeque<PendingDownload>>>,
+    search_limiter: Option<Arc<Mutex<SearchRateLimiter>>>,
+    download_limiter: Option<Arc<Mutex<DownloadConcurrencyLimiter>>>,
 }
 
 impl Drop for Client {
@@ -245,20 +331,34 @@ impl Drop for Client {
 }
 
 impl Client {
-    pub fn new(username: impl Into<String>, password: impl Into<String>) -> Self {
+    pub fn new(
+        username: impl Into<PlainTextUnencrypted>,
+        password: impl Into<PlainTextUnencrypted>,
+    ) -> Self {
         Self::with_settings(ClientSettings::new(username, password))
     }
 
     pub fn with_settings(settings: ClientSettings) -> Self {
         logger::init();
+
+        let search_limiter = settings.search_rate_limit_settings.as_ref().map(|s| {
+            Arc::new(Mutex::new(SearchRateLimiter::new(s.searches, s.per_period)))
+        });
+
+        let download_limiter = settings.download_rate_limit_settings.as_ref().map(|s| {
+            Arc::new(Mutex::new(DownloadConcurrencyLimiter::new(
+                s.concurrent_downloads,
+            )))
+        });
+
         Self {
-            enable_listen: settings.enable_listen,
-            listen_port: settings.listen_port,
-            address: settings.server_address,
-            username: settings.username,
-            password: settings.password,
+            settings,
+            state: Arc::new(Mutex::new(ClientState::Disconnected)),
             context: Arc::new(RwLock::new(ClientContext::new())),
             server_handle: None,
+            pending_downloads: Arc::new(Mutex::new(VecDeque::new())),
+            search_limiter,
+            download_limiter,
         }
     }
 
@@ -270,41 +370,71 @@ impl Client {
         }
     }
 
-    pub async fn connect(&mut self) {
+    /// Connect to the Soulseek server and login. Blocks until login succeeds or fails.
+    pub async fn connect(&mut self) -> Result<()> {
+        // Guard: if already Connected, return Ok
+        {
+            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if matches!(*state, ClientState::Connected) {
+                return Ok(());
+            }
+        }
+
+        *self.state.lock().unwrap_or_else(|e| e.into_inner()) = ClientState::Connecting;
+
+        let username = self.settings.username.0.clone();
+        let password = self.settings.password.0.clone();
+
         let (sender, message_reader) = mpsc::unbounded_channel::<ClientOperation>();
 
-        let mut ctx = self.context.write().unwrap();
-        ctx.sender = Some(sender.clone());
-        let peer_registry = PeerRegistry::new(
-            ctx.actor_system.clone(),
-            sender.clone(),
-            self.username.clone(),
-        );
-        ctx.peer_registry = Some(peer_registry);
-
-        let listen_sender = sender.clone();
+        {
+            let mut ctx = self.context.write().unwrap_or_else(|e| e.into_inner());
+            ctx.sender = Some(sender.clone());
+            let peer_registry = PeerRegistry::new(
+                ctx.actor_system.clone(),
+                sender.clone(),
+                username.clone(),
+            );
+            ctx.peer_registry = Some(peer_registry);
+        }
 
         let server_actor = ServerActor::new(
-            self.address.clone(),
-            sender,
-            self.listen_port,
-            self.enable_listen,
+            self.settings.server_address.clone(),
+            sender.clone(),
+            self.settings.listen_port,
+            self.settings.enable_listen,
+            self.settings.tcp_keepalive_settings.clone(),
+            self.settings.reconnect_settings.clone(),
         );
 
-        self.server_handle = Some(ctx.actor_system.spawn_with_handle(
-            server_actor,
-            |actor, handle| {
-                actor.set_self_handle(handle);
-            },
-        ));
+        let actor_system = self
+            .context
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .actor_system
+            .clone();
 
-        let cancellation_token = ctx.actor_system.cancellation_token().clone();
+        self.server_handle = Some(actor_system.spawn_with_handle(server_actor, |actor, handle| {
+            actor.set_self_handle(handle);
+        }));
 
-        if self.enable_listen {
-            let listen_port = self.listen_port;
-            let client_sender = listen_sender;
+        // Send Login — will be queued by ServerActor until TCP is connected
+        let (login_tx, login_rx) = tokio::sync::oneshot::channel();
+        if let Some(ref handle) = self.server_handle {
+            let _ = handle.send(ServerMessage::Login {
+                username: username.clone(),
+                password: password.clone(),
+                response: login_tx,
+            });
+        }
+
+        let cancellation_token = actor_system.cancellation_token().clone();
+
+        if self.settings.enable_listen {
+            let listen_port = self.settings.listen_port;
+            let client_sender = sender.clone();
             let context = self.context.clone();
-            let own_username = self.username.clone();
+            let own_username = username.clone();
             let token = cancellation_token.clone();
 
             tokio::spawn(async move {
@@ -334,33 +464,28 @@ impl Client {
         Self::listen_to_client_operations(
             message_reader,
             self.context.clone(),
-            self.username.clone(),
+            username.clone(),
             cancellation_token,
+            self.state.clone(),
+            self.pending_downloads.clone(),
+            self.download_limiter.clone(),
         );
-    }
 
-    pub async fn login(&self) -> Result<bool> {
-        info!("Logging in as {}", self.username);
-        if let Some(handle) = &self.server_handle {
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            let _ = handle.send(ServerMessage::Login {
-                username: self.username.clone(),
-                password: self.password.clone(),
-                response: tx,
-            });
-
-            match rx.await {
-                Ok(result) => result,
-                Err(_) => Err(SoulseekRs::Timeout),
+        // Wait for login result
+        match login_rx.await {
+            Ok(Ok(true)) => {
+                *self.state.lock().unwrap_or_else(|e| e.into_inner()) = ClientState::Connected;
+                Ok(())
             }
-        } else {
-            Err(SoulseekRs::NotConnected)
+            Ok(Err(e)) => Err(e),
+            Ok(Ok(false)) => Err(SoulseekRs::AuthenticationFailed),
+            Err(_) => Err(SoulseekRs::Timeout),
         }
     }
 
     #[allow(dead_code)]
     pub fn remove_peer(&self, username: &str) {
-        let context = self.context.read().unwrap();
+        let context = self.context.read().unwrap_or_else(|e| e.into_inner());
         if let Some(ref registry) = context.peer_registry
             && let Some(handle) = registry.remove_peer(username)
         {
@@ -380,18 +505,34 @@ impl Client {
     ) -> Result<Vec<SearchResult>> {
         info!("Searching for {}", query);
 
+        // Rate limiting: wait until a slot is available, then record the search
+        if let Some(ref lim) = self.search_limiter {
+            loop {
+                let wait = lim.lock().unwrap_or_else(|e| e.into_inner()).wait_duration();
+                match wait {
+                    None => break,
+                    Some(d) => tokio::time::sleep(d).await,
+                }
+            }
+            lim.lock().unwrap_or_else(|e| e.into_inner()).record();
+        }
+
         if let Some(handle) = &self.server_handle {
             let hash = md5::md5(query);
             let token = u32::from_str_radix(&hash[0..5], 16)?;
 
             // Initialize new search with query string as key
-            self.context.write().unwrap().searches.insert(
-                query.to_string(),
-                Search {
-                    token,
-                    results: Vec::new(),
-                },
-            );
+            self.context
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .searches
+                .insert(
+                    query.to_string(),
+                    Search {
+                        token,
+                        results: Vec::new(),
+                    },
+                );
 
             let _ = handle.send(ServerMessage::FileSearch {
                 token,
@@ -425,7 +566,7 @@ impl Client {
     pub fn get_search_results_count(&self, search_key: &str) -> usize {
         self.context
             .read()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .searches
             .get(search_key)
             .map(|s| s.results.len())
@@ -435,7 +576,7 @@ impl Client {
     pub fn get_search_results(&self, search_key: &str) -> Vec<SearchResult> {
         self.context
             .read()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .searches
             .get(search_key)
             .map(|s| s.results.clone())
@@ -451,11 +592,19 @@ impl Client {
     }
 
     pub fn get_all_searches(&self) -> HashMap<String, Search> {
-        self.context.read().unwrap().searches.clone()
+        self.context
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .searches
+            .clone()
     }
 
     pub fn get_all_downloads(&self) -> Vec<Download> {
-        self.context.read().unwrap().get_downloads().clone()
+        self.context
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_downloads()
+            .clone()
     }
 
     pub fn download(
@@ -477,20 +626,64 @@ impl Client {
             filename: filename.clone(),
             token,
             size,
-            download_directory,
+            download_directory: download_directory.clone(),
             status: DownloadStatus::Queued,
-            sender: download_sender,
+            sender: download_sender.clone(),
         };
 
-        let mut context = self.context.write().unwrap();
+        // Check state before write-locking context (consistent lock order: state → context)
+        let is_connected = {
+            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            matches!(*state, ClientState::Connected)
+        };
+
+        let mut context = self.context.write().unwrap_or_else(|e| e.into_inner());
         context.add_download(download.clone());
 
-        let download_initiated = if let Some(ref registry) = context.peer_registry {
-            registry
-                .queue_upload(&username, download.filename.clone())
-                .is_ok()
+        let download_initiated = if is_connected {
+            if let Some(ref registry) = context.peer_registry {
+                if let Some(ref lim_arc) = self.download_limiter {
+                    let mut lim = lim_arc.lock().unwrap_or_else(|e| e.into_inner());
+                    if lim.active < lim.max_concurrent {
+                        lim.active += 1;
+                        drop(lim);
+                        registry
+                            .queue_upload(&username, download.filename.clone())
+                            .is_ok()
+                    } else {
+                        // At concurrency limit — queue for later dispatch
+                        lim.queue.push_back(PendingDownload {
+                            filename: filename.clone(),
+                            username: username.clone(),
+                            size,
+                            download_directory,
+                            token,
+                            status_sender: download_sender,
+                        });
+                        true
+                    }
+                } else {
+                    registry
+                        .queue_upload(&username, download.filename.clone())
+                        .is_ok()
+                }
+            } else {
+                false
+            }
         } else {
-            false
+            // Disconnected: queue for replay after reconnect
+            self.pending_downloads
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push_back(PendingDownload {
+                    filename: filename.clone(),
+                    username: username.clone(),
+                    size,
+                    download_directory,
+                    token,
+                    status_sender: download_sender,
+                });
+            true
         };
 
         drop(context);
@@ -499,7 +692,7 @@ impl Client {
             let _ = download.sender.send(DownloadStatus::Failed);
             self.context
                 .write()
-                .unwrap()
+                .unwrap_or_else(|e| e.into_inner())
                 .update_download_with_status(token, DownloadStatus::Failed);
         }
 
@@ -511,7 +704,7 @@ impl Client {
         username: &str,
         filename: Option<&str>,
     ) {
-        let context = client_context.read().unwrap();
+        let context = client_context.read().unwrap_or_else(|e| e.into_inner());
         let failed_downloads: Vec<_> = context
             .get_downloads()
             .iter()
@@ -526,7 +719,7 @@ impl Client {
         drop(context);
 
         failed_downloads.iter().for_each(|token| {
-            let mut context = client_context.write().unwrap();
+            let mut context = client_context.write().unwrap_or_else(|e| e.into_inner());
             context.update_download_with_status(*token, DownloadStatus::Failed);
             context.remove_download(*token);
         });
@@ -537,6 +730,9 @@ impl Client {
         client_context: Arc<RwLock<ClientContext>>,
         own_username: String,
         cancellation_token: tokio_util::sync::CancellationToken,
+        state: Arc<Mutex<ClientState>>,
+        pending_downloads: Arc<Mutex<VecDeque<PendingDownload>>>,
+        download_limiter: Option<Arc<Mutex<DownloadConcurrencyLimiter>>>,
     ) {
         tokio::spawn(async move {
             loop {
@@ -557,6 +753,62 @@ impl Client {
                 };
 
                 match operation {
+                    ClientOperation::ServerDisconnected => {
+                        *state.lock().unwrap_or_else(|e| e.into_inner()) =
+                            ClientState::Disconnected;
+                    }
+                    ClientOperation::LoginSucceeded => {
+                        *state.lock().unwrap_or_else(|e| e.into_inner()) = ClientState::Connected;
+
+                        let pending: Vec<PendingDownload> = {
+                            let mut pd =
+                                pending_downloads.lock().unwrap_or_else(|e| e.into_inner());
+                            pd.drain(..).collect()
+                        };
+
+                        for pd in pending {
+                            let context =
+                                client_context.read().unwrap_or_else(|e| e.into_inner());
+                            if let Some(ref registry) = context.peer_registry {
+                                if let Some(ref lim_arc) = download_limiter {
+                                    let mut lim =
+                                        lim_arc.lock().unwrap_or_else(|e| e.into_inner());
+                                    if lim.active < lim.max_concurrent {
+                                        lim.active += 1;
+                                        drop(lim);
+                                        let _ =
+                                            registry.queue_upload(&pd.username, pd.filename);
+                                    } else {
+                                        lim.queue.push_back(pd);
+                                    }
+                                } else {
+                                    let _ = registry.queue_upload(&pd.username, pd.filename);
+                                }
+                            }
+                        }
+                    }
+                    ClientOperation::DownloadSlotFreed => {
+                        if let Some(ref lim_arc) = download_limiter {
+                            let next = {
+                                let mut lim =
+                                    lim_arc.lock().unwrap_or_else(|e| e.into_inner());
+                                lim.active = lim.active.saturating_sub(1);
+                                lim.queue.pop_front()
+                            };
+                            if let Some(pd) = next {
+                                let context =
+                                    client_context.read().unwrap_or_else(|e| e.into_inner());
+                                if let Some(ref registry) = context.peer_registry {
+                                    {
+                                        let mut lim =
+                                            lim_arc.lock().unwrap_or_else(|e| e.into_inner());
+                                        lim.active += 1;
+                                    }
+                                    let _ = registry.queue_upload(&pd.username, pd.filename);
+                                }
+                            }
+                        }
+                    }
                     ClientOperation::ConnectToPeer(peer) => {
                         let client_context_clone = client_context.clone();
                         let own_username_clone = own_username.clone();
@@ -572,7 +824,7 @@ impl Client {
                     }
                     ClientOperation::SearchResult(search_result) => {
                         trace!("[client] SearchResult {:?}", search_result);
-                        let mut context = client_context.write().unwrap();
+                        let mut context = client_context.write().unwrap_or_else(|e| e.into_inner());
                         let result_token = search_result.token;
 
                         // Find the search with matching token
@@ -584,7 +836,7 @@ impl Client {
                         }
                     }
                     ClientOperation::PeerDisconnected(username, error) => {
-                        let context = client_context.read().unwrap();
+                        let context = client_context.read().unwrap_or_else(|e| e.into_inner());
                         if let Some(ref registry) = context.peer_registry
                             && let Some(handle) = registry.remove_peer(&username)
                         {
@@ -595,7 +847,11 @@ impl Client {
                                 "[client] Peer {} disconnected with error: {:?}",
                                 username, error
                             );
-                            Self::process_failed_uploads(client_context.clone(), &username, None);
+                            Self::process_failed_uploads(
+                                client_context.clone(),
+                                &username,
+                                None,
+                            );
                         }
                     }
                     ClientOperation::PierceFireWall(peer) => {
@@ -603,7 +859,7 @@ impl Client {
                     }
                     ClientOperation::DownloadFromPeer(token, peer, allowed) => {
                         let maybe_download = {
-                            let client_context = client_context.read().unwrap();
+                            let client_context = client_context.read().unwrap_or_else(|e| e.into_inner());
                             client_context.get_download_by_token(token).cloned()
                         };
                         let own_username = own_username.clone();
@@ -639,7 +895,7 @@ impl Client {
                                                         .send(DownloadStatus::Completed);
                                                     client_context_clone
                                                         .write()
-                                                        .unwrap()
+                                                        .unwrap_or_else(|e| e.into_inner())
                                                         .update_download_with_status(
                                                             download.token,
                                                             DownloadStatus::Completed,
@@ -655,7 +911,7 @@ impl Client {
                                                         .send(DownloadStatus::Failed);
                                                     client_context_clone
                                                         .write()
-                                                        .unwrap()
+                                                        .unwrap_or_else(|e| e.into_inner())
                                                         .update_download_with_status(
                                                             download.token,
                                                             DownloadStatus::Failed,
@@ -676,6 +932,13 @@ impl Client {
                                             download.filename
                                         ),
                                     }
+
+                                    // Signal download slot freed (for concurrency limiter)
+                                    if let Ok(ctx) = client_context_clone.read() {
+                                        if let Some(ref sender) = ctx.sender {
+                                            let _ = sender.send(ClientOperation::DownloadSlotFreed);
+                                        }
+                                    }
                                 });
                             }
                             None => {
@@ -686,7 +949,7 @@ impl Client {
                     ClientOperation::NewPeer(new_peer) => {
                         let peer_exists = client_context
                             .read()
-                            .unwrap()
+                            .unwrap_or_else(|e| e.into_inner())
                             .peer_registry
                             .as_ref()
                             .map(|r| r.contains(&new_peer.username))
@@ -695,11 +958,16 @@ impl Client {
                         if peer_exists {
                             debug!("Already connected to {}", new_peer.username);
                         } else if let Some(server_sender) =
-                            &client_context.read().unwrap().server_sender
+                            &client_context
+                                .read()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .server_sender
                         {
                             server_sender
                                 .send(ServerMessage::GetPeerAddress(new_peer.username.clone()))
-                                .unwrap();
+                                .unwrap_or_else(|e| {
+                                    error!("[client] Failed to send GetPeerAddress: {}", e)
+                                });
                         }
 
                         let addr = new_peer.tcp_stream.peer_addr().unwrap();
@@ -738,7 +1006,7 @@ impl Client {
 
                         let peer_exists = client_context
                             .read()
-                            .unwrap()
+                            .unwrap_or_else(|e| e.into_inner())
                             .peer_registry
                             .as_ref()
                             .map(|r| r.contains(&username))
@@ -769,7 +1037,7 @@ impl Client {
                         }
                     }
                     ClientOperation::UpdateDownloadTokens(transfer, username) => {
-                        let mut context = client_context.write().unwrap();
+                        let mut context = client_context.write().unwrap_or_else(|e| e.into_inner());
 
                         let download_to_update = context.get_downloads().iter().find_map(|d| {
                             if d.username == username && d.filename == transfer.filename {
@@ -805,7 +1073,10 @@ impl Client {
                         );
                     }
                     ClientOperation::SetServerSender(sender) => {
-                        client_context.write().unwrap().server_sender = Some(sender);
+                        client_context
+                            .write()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .server_sender = Some(sender);
                         debug!("[client] Server sender initialized");
                     }
                 }
@@ -836,7 +1107,7 @@ impl Client {
                     tokio::net::TcpStream::from_std(s).ok()
                 });
 
-                let context = client_context.read().unwrap();
+                let context = client_context.read().unwrap_or_else(|e| e.into_inner());
                 if let Some(ref registry) = context.peer_registry {
                     match registry.register_peer(peer_clone, tokio_stream, None) {
                         Ok(_) => (),
@@ -872,11 +1143,18 @@ impl Client {
                         let _ = download.sender.send(DownloadStatus::Completed);
                         client_context
                             .write()
-                            .unwrap()
+                            .unwrap_or_else(|e| e.into_inner())
                             .update_download_with_status(download.token, DownloadStatus::Completed);
                     }
                     Err(e) => {
                         trace!("[client] failed to download: {}", e);
+                    }
+                }
+
+                // Signal download slot freed (for concurrency limiter)
+                if let Ok(ctx) = client_context.read() {
+                    if let Some(ref sender) = ctx.sender {
+                        let _ = sender.send(ClientOperation::DownloadSlotFreed);
                     }
                 }
             }
@@ -885,6 +1163,7 @@ impl Client {
             }
         }
     }
+
     fn pierce_firewall(
         peer: Peer,
         client_context: Arc<RwLock<ClientContext>>,
@@ -892,14 +1171,11 @@ impl Client {
     ) {
         debug!("Piercing firewall for peer: {:?}", peer);
 
-        let context = client_context.read().unwrap();
+        let context = client_context.read().unwrap_or_else(|e| e.into_inner());
         if let Some(server_sender) = &context.server_sender {
             if let Some(token) = peer.token {
-                match server_sender.send(ServerMessage::PierceFirewall(token)) {
-                    Ok(_) => (),
-                    Err(e) => {
-                        error!("Failed to send PierceFirewall message: {}", e)
-                    }
+                if let Err(e) = server_sender.send(ServerMessage::PierceFirewall(token)) {
+                    error!("Failed to send PierceFirewall message: {}", e);
                 }
             } else {
                 error!("No token available for PierceFirewall");
@@ -944,5 +1220,24 @@ mod tests {
         context.remove_download(new_token);
         assert_eq!(context.get_downloads().len(), 0);
         assert!(context.get_download_by_token(1234).is_none());
+    }
+
+    #[test]
+    fn test_client_settings_default_compiles() {
+        let settings = ClientSettings::default();
+        assert_eq!(settings.listen_port, 2234);
+        assert!(settings.search_rate_limit_settings.is_some());
+        assert!(settings.download_rate_limit_settings.is_some());
+    }
+
+    #[test]
+    fn test_search_rate_limiter() {
+        let mut lim = SearchRateLimiter::new(2, Duration::from_secs(10));
+        assert!(lim.wait_duration().is_none());
+        lim.record();
+        assert!(lim.wait_duration().is_none());
+        lim.record();
+        // Now at limit — should need to wait
+        assert!(lim.wait_duration().is_some());
     }
 }

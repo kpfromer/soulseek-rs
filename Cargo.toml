@@ -15,3 +15,4 @@ tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 bytes = "1"
 thiserror = "2.0.18"
+socket2 = { version = "0.5", features = ["all"] }

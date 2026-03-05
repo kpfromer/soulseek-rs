@@ -1,5 +1,5 @@
 use crate::actor::{Actor, ActorHandle, ConnectionState};
-use crate::client::ClientOperation;
+use crate::client::{ClientOperation, KeepAliveSettings, ReconnectSettings};
 use crate::dispatcher::MessageDispatcher;
 use crate::message::server::ConnectToPeerHandler;
 use crate::message::server::ExcludedSearchPhrasesHandler;
@@ -219,6 +219,12 @@ pub struct ServerActor {
     dispatcher_receiver: Option<UnboundedReceiver<ServerMessage>>,
     dispatcher_sender: Option<UnboundedSender<ServerMessage>>,
     queued_messages: Vec<ServerMessage>,
+    // Reconnect / keepalive state
+    credentials: Option<(String, String)>,
+    reconnect_settings: ReconnectSettings,
+    reconnect_attempt: u32,
+    last_disconnect: Option<Instant>,
+    tcp_keepalive: KeepAliveSettings,
 }
 
 impl ServerActor {
@@ -227,6 +233,8 @@ impl ServerActor {
         client_channel: UnboundedSender<ClientOperation>,
         listen_port: u32,
         enable_listen: bool,
+        tcp_keepalive: KeepAliveSettings,
+        reconnect_settings: ReconnectSettings,
     ) -> Self {
         Self {
             address,
@@ -242,6 +250,11 @@ impl ServerActor {
             client_channel,
             self_handle: None,
             queued_messages: Vec::new(),
+            credentials: None,
+            reconnect_settings,
+            reconnect_attempt: 0,
+            last_disconnect: None,
+            tcp_keepalive,
         }
     }
 
@@ -276,9 +289,25 @@ impl ServerActor {
 
         match socket_addr {
             Some(addr) => {
-                // Use std TcpStream for synchronous connect, then convert to tokio
                 match std::net::TcpStream::connect(addr) {
                     Ok(std_stream) => {
+                        // Apply TCP keepalive via socket2
+                        let socket = socket2::Socket::from(std_stream);
+                        if let KeepAliveSettings::Enabled {
+                            idle,
+                            interval,
+                            count,
+                            ..
+                        } = &self.tcp_keepalive
+                        {
+                            let ka = socket2::TcpKeepalive::new()
+                                .with_time(*idle)
+                                .with_interval(*interval)
+                                .with_retries(*count);
+                            socket.set_tcp_keepalive(&ka).ok();
+                        }
+                        let std_stream: std::net::TcpStream = socket.into();
+
                         std_stream.set_nodelay(true).ok();
                         std_stream.set_nonblocking(true).ok();
 
@@ -327,9 +356,12 @@ impl ServerActor {
         self.dispatcher_receiver = Some(dispatcher_receiver);
         self.dispatcher_sender = Some(dispatcher_sender.clone());
 
-        self.client_channel
+        if let Err(e) = self
+            .client_channel
             .send(ClientOperation::SetServerSender(dispatcher_sender.clone()))
-            .unwrap();
+        {
+            error!("[server] Failed to send SetServerSender: {}", e);
+        }
 
         let mut handlers = Handlers::new();
 
@@ -370,55 +402,6 @@ impl ServerActor {
         }
     }
 
-    pub fn login(
-        &mut self,
-        username: &str,
-        password: &str,
-    ) -> Result<bool, SoulseekRs> {
-        self.queue_message(MessageFactory::build_login_message(
-            username, password,
-        ));
-        let context = self.context.clone();
-        let mut logged_in;
-        let timeout = Duration::from_secs(5);
-        let start = Instant::now();
-
-        loop {
-            if start.elapsed() > timeout {
-                warn!("Timeout waiting for login response");
-                return Err(SoulseekRs::Timeout);
-            }
-
-            {
-                logged_in = context.read().unwrap().logged_in
-            }
-
-            if logged_in.is_some() {
-                break;
-            }
-
-            std::thread::sleep(Duration::from_millis(50));
-        }
-
-        if logged_in.unwrap() {
-            info!("Logged in as {}", username);
-            self.queue_message(MessageFactory::build_shared_folders_message(
-                1, 499,
-            ));
-            self.queue_message(MessageFactory::build_no_parent_message());
-            self.queue_message(MessageFactory::build_set_status_message(2));
-            if self.enable_listen {
-                self.queue_message(
-                    MessageFactory::build_set_wait_port_message(
-                        self.listen_port,
-                    ),
-                );
-            }
-        }
-
-        Ok(logged_in.unwrap())
-    }
-
     pub fn file_search(&mut self, token: u32, query: &str) {
         self.queue_message(MessageFactory::build_file_search_message(
             token, query,
@@ -447,13 +430,29 @@ impl ServerActor {
                     }
                     ConnectionType::D => None,
                 } {
-                    self.client_channel.send(op).unwrap();
+                    if let Err(e) = self.client_channel.send(op) {
+                        error!("[server] Failed to send ConnectToPeer: {}", e);
+                    }
                 }
             }
             ServerMessage::LoginStatus(logged_in) => {
-                self.context.write().unwrap().logged_in = Some(logged_in);
+                self.context
+                    .write()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .logged_in = Some(logged_in);
 
                 if logged_in {
+                    // Reset reconnect state on successful login
+                    self.reconnect_attempt = 0;
+                    self.last_disconnect = None;
+
+                    // Notify client that login succeeded (used for reconnect path)
+                    if let Err(e) =
+                        self.client_channel.send(ClientOperation::LoginSucceeded)
+                    {
+                        error!("[server] Failed to send LoginSucceeded: {}", e);
+                    }
+
                     // Post-login setup: tell the server about ourselves
                     self.queue_message(
                         MessageFactory::build_shared_folders_message(1, 499),
@@ -521,6 +520,9 @@ impl ServerActor {
                 password,
                 response,
             } => {
+                // Store credentials for reconnect
+                self.credentials = Some((username.clone(), password.clone()));
+
                 self.queue_message(MessageFactory::build_login_message(
                     &username, &password,
                 ));
@@ -537,7 +539,7 @@ impl ServerActor {
                         }
 
                         if let Some(logged_in) =
-                            context.read().unwrap().logged_in
+                            context.read().unwrap_or_else(|e| e.into_inner()).logged_in
                         {
                             let result = if logged_in {
                                 Ok(true)
@@ -691,6 +693,26 @@ impl ServerActor {
         debug!("[server] disconnect");
 
         self.stream.take();
+
+        // Only transition if we were previously connected or connecting
+        if matches!(
+            self.connection_state,
+            ConnectionState::Connected | ConnectionState::Connecting { .. }
+        ) {
+            self.connection_state = ConnectionState::Disconnected;
+            self.last_disconnect = Some(Instant::now());
+            self.reconnect_attempt += 1;
+
+            // Reset login state so the polling task doesn't see stale data
+            self.context
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .logged_in = None;
+
+            if let Err(e) = self.client_channel.send(ClientOperation::ServerDisconnected) {
+                error!("[server] Failed to send ServerDisconnected: {}", e);
+            }
+        }
     }
 
     fn disconnect(&mut self) {
@@ -751,6 +773,12 @@ impl ServerActor {
 
         self.initialize_dispatcher();
 
+        // On reconnect (credentials already stored), auto-queue login
+        if let Some((username, password)) = self.credentials.clone() {
+            info!("[server] Reconnect: auto-queuing login for {}", username);
+            self.queue_message(MessageFactory::build_login_message(&username, &password));
+        }
+
         let queued = std::mem::take(&mut self.queued_messages);
         for msg in queued {
             self.handle_message(msg);
@@ -761,6 +789,52 @@ impl ServerActor {
         }
 
         self.process_read();
+    }
+
+    fn maybe_reconnect(&mut self) {
+        // Only reconnect if we have credentials (i.e., login was attempted at least once)
+        if self.credentials.is_none() {
+            return;
+        }
+
+        let Some(last_disconnect) = self.last_disconnect else {
+            return;
+        };
+
+        let backoff = match &self.reconnect_settings {
+            ReconnectSettings::Disabled => return,
+            ReconnectSettings::EnabledExponentialBackoff {
+                min_delay,
+                max_delay,
+                max_attempts,
+            } => {
+                if let Some(max) = max_attempts {
+                    if self.reconnect_attempt > *max {
+                        warn!(
+                            "[server] Max reconnect attempts ({}) reached, giving up",
+                            max
+                        );
+                        return;
+                    }
+                }
+                // Exponential backoff: min_delay * 2^(attempt-1), capped at max_delay
+                let exp = self.reconnect_attempt.saturating_sub(1);
+                let factor = 1u64.checked_shl(exp).unwrap_or(u64::MAX);
+                let delay_secs = (min_delay.as_secs()).saturating_mul(factor);
+                Duration::from_secs(delay_secs.min(max_delay.as_secs()))
+            }
+        };
+
+        if last_disconnect.elapsed() < backoff {
+            return;
+        }
+
+        info!(
+            "[server] Attempting reconnect (attempt {}, backoff {}s)...",
+            self.reconnect_attempt,
+            backoff.as_secs()
+        );
+        self.initiate_connection();
     }
 }
 
@@ -795,7 +869,9 @@ impl Actor for ServerActor {
                     self.process_read();
                 }
             }
-            ConnectionState::Disconnected => {}
+            ConnectionState::Disconnected => {
+                self.maybe_reconnect();
+            }
         }
     }
 }

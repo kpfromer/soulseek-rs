@@ -17,12 +17,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Connect and login
     let mut client = Client::new(username.trim(), password.trim());
-    client.connect().await;
-    let logged_in = client.login().await?;
-    if !logged_in {
-        eprintln!("Login failed.");
-        return Ok(());
-    }
+    client.connect().await?;
     println!("Logged in!\n");
 
     // Search
