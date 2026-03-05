@@ -1,32 +1,16 @@
 use super::state_monitor::WorkerEvent;
-use crate::actor::server_actor::{ServerActor, ServerMessage};
+use crate::actor::server_actor::ServerMessage;
 use crate::client::{ClientContext, ClientOperation};
-use crate::search_rate_limiter::SlidingRateLimiter;
 use crate::types::DownloadStatus;
-use crate::utils::logger;
 use crate::{
-    Transfer,
-    actor::{ActorSystem, peer_registry::PeerRegistry},
-    error::{Result, SoulseekRs},
-    peer::{ConnectionType, DownloadPeer, NewPeer, Peer, listen::Listen},
-    types::{Download, Search, SearchResult},
-    utils::md5,
+    peer::{ConnectionType, DownloadPeer, Peer},
+    types::Download,
 };
 use crate::{debug, error, info, trace, warn};
-use std::collections::VecDeque;
 use std::sync::Arc;
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
-use std::{
-    collections::HashMap,
-    sync::{
-        RwLock,
-        atomic::{AtomicBool, Ordering},
-    },
-};
+use std::sync::RwLock;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::UnboundedSender;
-use tokio::sync::mpsc::{self};
 use tokio_util::sync::CancellationToken;
 
 /// Owns the incoming-operations loop for a live connection.

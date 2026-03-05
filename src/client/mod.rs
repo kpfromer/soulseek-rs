@@ -3,14 +3,13 @@ use crate::search_rate_limiter::SlidingRateLimiter;
 use crate::types::DownloadStatus;
 use crate::utils::logger;
 use crate::{
-    Transfer,
-    actor::{ActorSystem, peer_registry::PeerRegistry},
+    actor::peer_registry::PeerRegistry,
     error::{Result, SoulseekRs},
-    peer::{ConnectionType, DownloadPeer, NewPeer, Peer, listen::Listen},
+    peer::listen::Listen,
     types::{Download, Search, SearchResult},
     utils::md5,
 };
-use crate::{debug, error, info, trace, warn};
+use crate::{error, info, trace};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -21,8 +20,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
-use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
-use tokio_util::sync::CancellationToken;
+use tokio::sync::mpsc::{self, UnboundedReceiver};
 
 mod connected_worker;
 mod context;
