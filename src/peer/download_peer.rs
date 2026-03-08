@@ -99,34 +99,6 @@ impl FileManager {
     }
 }
 
-struct StreamProcessor {
-    total_bytes: usize,
-    received: bool,
-    buffer: Vec<u8>,
-}
-
-impl StreamProcessor {
-    fn new() -> Self {
-        Self {
-            total_bytes: 0,
-            received: false,
-            buffer: Vec::new(),
-        }
-    }
-
-    fn process_data_chunk(&mut self, data: &[u8]) {
-        self.buffer.extend_from_slice(data);
-        self.total_bytes += data.len();
-    }
-
-    fn should_continue(&self, expected_size: Option<usize>) -> bool {
-        if let Some(size) = expected_size {
-            self.total_bytes < size
-        } else {
-            true
-        }
-    }
-}
 
 pub struct DownloadPeer {
     username: String,
@@ -247,17 +219,25 @@ impl DownloadPeer {
         download_info.ok_or(DownloadError::TokenNotFound(token_u32))
     }
 
+    fn open_output_file(path: &str) -> Result<io::BufWriter<fs::File>, DownloadError> {
+        if let Some(parent) = Path::new(path).parent() {
+            fs::create_dir_all(parent).map_err(DownloadError::FileWriteError)?;
+        }
+        let f = fs::File::create(path).map_err(DownloadError::FileWriteError)?;
+        Ok(io::BufWriter::new(f))
+    }
+
     fn read_download_stream(
         &self,
         stream: &mut TcpStream,
         client_context: &Arc<RwLock<ClientContext>>,
         mut download: Option<Download>,
-    ) -> Result<(Vec<u8>, Download), DownloadError> {
-        let mut processor = StreamProcessor::new();
-        let mut read_buffer = [1u8; READ_BUFFER_SIZE];
+    ) -> Result<(usize, Download, String), DownloadError> {
+        let mut total_bytes: usize = 0;
+        let mut received_handshake = false;
+        let mut read_buffer = [0u8; READ_BUFFER_SIZE];
         let mut chunk_counter = 0;
-        let start_time = Instant::now();
-        let mut last_update_time = start_time;
+        let mut last_update_time = Instant::now();
 
         trace!(
             "[download_peer:{}] Starting to read data from peer",
@@ -270,19 +250,27 @@ impl DownloadPeer {
                 .map_err(DownloadError::StreamWriteError)?;
         }
 
+        // Open file early if download target is already known (no_pierce=true path).
+        let (mut writer, mut final_path) = if let Some(ref dl) = download {
+            let path = self.resolve_download_path(dl)?;
+            (Some(Self::open_output_file(&path)?), Some(path))
+        } else {
+            (None, None)
+        };
+
         loop {
             match stream.read(&mut read_buffer) {
                 Ok(0) => {
                     trace!(
                         "[download_peer:{}] connection closed by peer. bytes read: {}",
-                        self.username, processor.total_bytes
+                        self.username, total_bytes
                     );
                     break;
                 }
                 Ok(bytes_read) => {
                     let data = &read_buffer[..bytes_read];
 
-                    if !self.no_pierce && !processor.received {
+                    if !self.no_pierce && !received_handshake {
                         let new_download = self
                             .handle_pierce_firewall_response(
                                 data,
@@ -293,18 +281,25 @@ impl DownloadPeer {
                             "[download_peer:{}] got download info for token: {} - filename: {}",
                             self.username, self.token, new_download.filename
                         );
+                        // Now that we know the target, open the file.
+                        let path = self.resolve_download_path(&new_download)?;
+                        writer = Some(Self::open_output_file(&path)?);
+                        final_path = Some(path);
                         download = Some(new_download);
-                        processor.received = true;
+                        received_handshake = true;
 
-                        // Process any remaining bytes after the 4-byte token as file data
+                        // Any bytes after the 4-byte token are the start of file data.
                         if data.len() > 4 {
-                            processor.process_data_chunk(&data[4..]);
+                            let chunk = &data[4..];
+                            writer.as_mut().unwrap().write_all(chunk).map_err(DownloadError::FileWriteError)?;
+                            total_bytes += chunk.len();
                             chunk_counter += 1;
                         }
                         continue;
                     }
 
-                    processor.process_data_chunk(data);
+                    writer.as_mut().unwrap().write_all(data).map_err(DownloadError::FileWriteError)?;
+                    total_bytes += bytes_read;
                     chunk_counter += 1;
 
                     if let Some(ref dl) = download
@@ -320,7 +315,7 @@ impl DownloadPeer {
                         };
 
                         let status = DownloadStatus::InProgress {
-                            bytes_downloaded: processor.total_bytes as u64,
+                            bytes_downloaded: total_bytes as u64,
                             total_bytes: dl.size,
                             speed_bytes_per_sec: speed,
                         };
@@ -338,7 +333,7 @@ impl DownloadPeer {
                         .ok_or(DownloadError::DownloadInfoMissing(self.token))?
                         .size as usize;
 
-                    if !processor.should_continue(Some(expected_size)) {
+                    if total_bytes >= expected_size {
                         break;
                     }
                 }
@@ -348,15 +343,18 @@ impl DownloadPeer {
             }
         }
 
+        if let Some(mut w) = writer {
+            w.flush().map_err(DownloadError::FileWriteError)?;
+        }
+
         trace!(
             "[download_peer:{}] finished reading data from peer",
             self.username
         );
 
-        let download =
-            download.ok_or(DownloadError::DownloadInfoMissing(self.token))?;
-
-        Ok((processor.buffer, download))
+        let download = download.ok_or(DownloadError::DownloadInfoMissing(self.token))?;
+        let final_path = final_path.ok_or(DownloadError::DownloadInfoMissing(self.token))?;
+        Ok((total_bytes, download, final_path))
     }
 
     fn resolve_download_path(
@@ -394,21 +392,6 @@ impl DownloadPeer {
             .map(String::from)
     }
 
-    fn save_downloaded_file(
-        &self,
-        path: &str,
-        data: &[u8],
-    ) -> Result<(), DownloadError> {
-        if let Some(parent) = Path::new(path).parent() {
-            fs::create_dir_all(parent)
-                .map_err(DownloadError::FileWriteError)?;
-        }
-
-        fs::write(path, data).map_err(DownloadError::FileWriteError)?;
-
-        Ok(())
-    }
-
     pub fn download_file(
         self,
         client_context: Arc<RwLock<ClientContext>>,
@@ -441,16 +424,13 @@ impl DownloadPeer {
         self.perform_handshake(&mut stream)?;
         trace!("[download_peer:{}] handshake completed", self.username);
 
-        let (buffer, download) =
+        let (total_bytes, download, final_path) =
             self.read_download_stream(&mut stream, &client_context, download)?;
-
-        let final_path = self.resolve_download_path(&download)?;
-        self.save_downloaded_file(&final_path, &buffer)?;
 
         trace!(
             "[download_peer:{}] download completed successfully: {} bytes, saved to: {}",
             self.username,
-            buffer.len(),
+            total_bytes,
             final_path
         );
 
