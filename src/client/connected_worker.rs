@@ -121,7 +121,7 @@ impl ConnectedWorker {
                                 download.username.clone(),
                                 peer.host.clone(),
                                 peer.port,
-                                token,
+                                token.0,
                                 allowed,
                                 own_username,
                             );
@@ -361,7 +361,7 @@ impl ConnectedWorker {
                     peer.username,
                     peer.host,
                     peer.port,
-                    peer.token.unwrap(),
+                    peer.token.unwrap().0,
                     false,
                     own_username,
                 );

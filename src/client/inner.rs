@@ -7,6 +7,7 @@ use crate::client::ClientContext;
 use crate::client::DownloadConcurrencyLimiter;
 use crate::path::SoulseekPath;
 use crate::search_rate_limiter::SlidingRateLimiter;
+use crate::token::DownloadToken;
 use std::sync::Arc;
 use std::sync::RwLock;
 use tokio::sync::mpsc::UnboundedSender;
@@ -23,7 +24,7 @@ pub struct PendingDownload {
     pub username: String,
     pub size: u64,
     pub download_directory: String,
-    pub token: u32,
+    pub token: DownloadToken,
     pub status_sender: UnboundedSender<DownloadStatus>,
 }
 

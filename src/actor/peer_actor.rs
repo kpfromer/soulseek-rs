@@ -1,5 +1,6 @@
 use crate::actor::{Actor, ActorHandle, ConnectionState};
 use crate::client::ClientOperation;
+use crate::token::{DownloadToken, PierceToken};
 use crate::dispatcher::MessageDispatcher;
 use crate::message::peer::{
     FileSearchResponse, GetShareFileList, PeerInit, PlaceInQueueResponse, TransferRequest,
@@ -26,7 +27,7 @@ pub enum PeerMessage {
     TransferRequest(Transfer),
     UploadFailed(String, SoulseekPath),
     TransferResponse {
-        token: u32,
+        token: DownloadToken,
         allowed: bool,
         reason: Option<String>,
     },
@@ -228,7 +229,7 @@ impl PeerActor {
             PeerMessage::RequestTransfer(download) => {
                 let message = MessageFactory::build_transfer_request_message(
                     download.filename.as_str(),
-                    download.token,
+                    download.token.0,
                 );
                 self.send_message(message);
             }
@@ -476,7 +477,7 @@ impl PeerActor {
     fn on_connection_established(&mut self) {
         let peer = self.peer.read().unwrap();
         let username = peer.username.clone();
-        let token = peer.token.unwrap_or(0);
+        let token = peer.token.unwrap_or(PierceToken(0));
         drop(peer);
 
         let Some(ref stream) = self.stream else {
@@ -486,7 +487,7 @@ impl PeerActor {
         // For outbound connections (ConnectToPeer), send PierceFireWall
         // so the remote peer can match this connection to the original request.
         if self.needs_handshake {
-            let handshake_msg = MessageFactory::build_pierce_firewall_message(token);
+            let handshake_msg = MessageFactory::build_pierce_firewall_message(token.0);
             match stream.try_write(&handshake_msg.get_buffer()) {
                 Ok(_) => {
                     debug!(

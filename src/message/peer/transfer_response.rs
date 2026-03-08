@@ -1,6 +1,7 @@
 use crate::{
     message::{Message, MessageHandler},
     peer::PeerMessage,
+    token::DownloadToken,
 };
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -12,7 +13,7 @@ impl MessageHandler<PeerMessage> for TransferResponse {
     }
 
     fn handle(&self, message: &mut Message, sender: UnboundedSender<PeerMessage>) {
-        let token = message.read_int32();
+        let token = DownloadToken(message.read_int32());
         let allowed = message.read_int8();
         let reason = (allowed == 0).then(|| message.read_string());
 

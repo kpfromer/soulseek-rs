@@ -8,6 +8,7 @@ pub use crate::actor::peer_registry::PeerRegistry;
 pub use download_peer::DownloadPeer;
 
 use crate::message::Message;
+use crate::token::PierceToken;
 use core::fmt;
 use std::{net::TcpStream, str::FromStr};
 
@@ -16,14 +17,14 @@ use std::{net::TcpStream, str::FromStr};
 pub struct NewPeer {
     pub username: String,
     pub connection_type: ConnectionType,
-    pub token: u32,
+    pub token: PierceToken,
     pub tcp_stream: TcpStream,
 }
 impl NewPeer {
     pub fn new_from_message(message: &mut Message, tcp_stream: TcpStream) -> Self {
         let username = message.read_string();
         let connection_type = message.read_string().parse().unwrap();
-        let token = message.read_int32();
+        let token = PierceToken(message.read_int32());
 
         Self {
             username,
@@ -83,7 +84,7 @@ pub struct Peer {
     pub connection_type: ConnectionType,
     pub host: String,
     pub port: u32,
-    pub token: Option<u32>,
+    pub token: Option<PierceToken>,
     pub privileged: Option<u8>,
     pub unknown: Option<u8>,
     pub obfuscated_port: Option<u8>,
@@ -95,7 +96,7 @@ impl Peer {
         connection_type: ConnectionType,
         host: String,
         port: u32,
-        token: Option<u32>,
+        token: Option<PierceToken>,
         privileged: u8,
         unknown: u8,
         obfuscated_port: u8,
@@ -130,7 +131,7 @@ impl Peer {
 
         let (port, token, privileged, unknown, obfuscated_port) = (
             message.read_int32(),
-            message.read_int32(),
+            PierceToken(message.read_int32()),
             message.read_int8(),
             message.read_int8(),
             message.read_int8(),
@@ -164,7 +165,7 @@ fn test_new_from_message() {
     assert!(matches!(peer.connection_type, ConnectionType::P));
     assert_eq!(peer.host, "45.37.231.27");
     assert_eq!(peer.port, 2234);
-    assert_eq!(peer.token, Some(1658546));
+    assert_eq!(peer.token, Some(PierceToken(1658546)));
     assert_eq!(peer.privileged, Some(0));
     assert_eq!(peer.unknown, Some(0));
     assert_eq!(peer.obfuscated_port, Some(0));
@@ -188,7 +189,7 @@ fn test_new_from_message2() {
     assert!(matches!(peer.connection_type, ConnectionType::P));
     assert_eq!(peer.host, "68.193.128.137");
     assert_eq!(peer.port, 2235);
-    assert_eq!(peer.token, Some(4154));
+    assert_eq!(peer.token, Some(PierceToken(4154)));
     assert_eq!(peer.privileged, Some(0));
     assert_eq!(peer.unknown, Some(1));
     assert_eq!(peer.obfuscated_port, Some(0));

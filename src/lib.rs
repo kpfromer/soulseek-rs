@@ -7,6 +7,7 @@ pub mod message;
 pub mod path;
 pub mod peer;
 pub mod search_rate_limiter;
+pub mod token;
 pub mod types;
 #[macro_use]
 pub mod utils;
@@ -24,4 +25,5 @@ pub use actor::server_actor::PeerAddress;
 pub use client::{Client, ClientSettings};
 pub use error::{Result, SoulseekRs};
 pub use path::SoulseekPath;
+pub use token::{DownloadToken, PierceToken, SearchToken};
 pub use types::{DownloadStatus, File, FileAttributes, Search, SearchResult, Transfer};

@@ -1,5 +1,6 @@
 use crate::actor::server_actor::ServerMessage;
 use crate::path::SoulseekPath;
+use crate::token::DownloadToken;
 use crate::{
     Transfer,
     error::SoulseekRs,
@@ -15,7 +16,7 @@ pub enum ClientOperation {
     SearchResult(SearchResult),
     PeerDisconnected(String, Option<SoulseekRs>),
     PierceFireWall(Peer),
-    DownloadFromPeer(u32, Peer, bool),
+    DownloadFromPeer(DownloadToken, Peer, bool),
     UpdateDownloadTokens(Transfer, String),
     GetPeerAddressResponse {
         username: String,

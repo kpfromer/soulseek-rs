@@ -93,7 +93,7 @@ impl MessageFactory {
     pub fn build_transfer_response_message(transfer: Transfer) -> Message {
         Message::new()
             .write_int32(41)
-            .write_int32(transfer.token)
+            .write_int32(transfer.token.0)
             .write_bool(true)
             .write_int64(transfer.size)
             .clone()

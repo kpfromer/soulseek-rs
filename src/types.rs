@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::token::{DownloadToken, SearchToken};
 use crate::{error::Result, message::Message, path::SoulseekPath, utils::zlib::deflate};
 
 #[derive(Debug, Clone, Default)]
@@ -46,7 +47,7 @@ impl UploadFailed {
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct SearchResult {
-    pub token: u32,
+    pub token: SearchToken,
     pub files: Vec<File>,
     pub slots: u8,
     pub speed: u32,
@@ -55,7 +56,7 @@ pub struct SearchResult {
 
 #[derive(Debug, Clone)]
 pub struct Search {
-    pub token: u32,
+    pub token: SearchToken,
     pub results: Vec<SearchResult>,
 }
 
@@ -68,7 +69,7 @@ impl SearchResult {
         let mut message = Message::new_with_data(deflated);
 
         let username = message.read_string();
-        let token = message.read_int32();
+        let token = SearchToken(message.read_int32());
         let n_files = message.read_int32();
         let mut files: Vec<File> = Vec::new();
         for _ in 0..n_files {
@@ -106,7 +107,7 @@ impl SearchResult {
 #[allow(dead_code)]
 pub struct Transfer {
     pub direction: u32,
-    pub token: u32,
+    pub token: DownloadToken,
     pub filename: SoulseekPath,
     pub size: u64,
 }
@@ -114,7 +115,7 @@ pub struct Transfer {
 pub struct Download {
     pub username: String,
     pub filename: SoulseekPath,
-    pub token: u32,
+    pub token: DownloadToken,
     pub size: u64,
     pub download_directory: String,
     pub status: DownloadStatus,
@@ -166,7 +167,7 @@ pub enum DownloadStatus {
 impl Transfer {
     pub fn new_from_message(message: &mut Message) -> Self {
         let direction = message.read_int32();
-        let token = message.read_int32();
+        let token = DownloadToken(message.read_int32());
         let filename = SoulseekPath::from_wire(message.read_string());
         let size = message.read_int64();
 

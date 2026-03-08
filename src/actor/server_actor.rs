@@ -25,6 +25,7 @@ use std::time::{Duration, Instant};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
+use crate::token::{PierceToken, SearchToken};
 use crate::{SoulseekRs, debug, error, info, trace, warn};
 
 #[derive(Debug, Clone)]
@@ -96,12 +97,12 @@ pub enum ServerMessage {
         response: tokio::sync::oneshot::Sender<Result<bool, SoulseekRs>>,
     },
     FileSearch {
-        token: u32,
+        token: SearchToken,
         query: String,
     },
     #[allow(dead_code)]
     ConnectToPeer(Peer),
-    PierceFirewall(u32),
+    PierceFirewall(PierceToken),
     GetPeerAddress(String),
     GetPeerAddressResponse {
         username: String,
@@ -368,7 +369,7 @@ impl ServerActor {
                 }
             }
             ServerMessage::PierceFirewall(token) => {
-                self.send_message(MessageFactory::build_pierce_firewall_message(token));
+                self.send_message(MessageFactory::build_pierce_firewall_message(token.0));
             }
             ServerMessage::SendMessage(message) => {
                 self.send_message(message);
@@ -423,7 +424,7 @@ impl ServerActor {
                 self.login_deadline = Some(Instant::now() + Duration::from_secs(5));
             }
             ServerMessage::FileSearch { token, query } => {
-                self.file_search(token, &query);
+                self.file_search(token.0, &query);
             }
         }
     }

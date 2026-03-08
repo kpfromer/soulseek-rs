@@ -6,9 +6,9 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::client::{ClientContext, ClientOperation};
-
 use crate::message::{Message, MessageReader};
 use crate::peer::{ConnectionType, DownloadPeer, Peer};
+use crate::token::DownloadToken;
 use crate::types::Download;
 use crate::{DownloadStatus, debug, error, info, trace};
 
@@ -50,7 +50,7 @@ async fn read_peer_init_message(
     }
 }
 
-fn parse_pierce_firewall_token(message: &mut Message) -> Option<u32> {
+fn parse_pierce_firewall_token(message: &mut Message) -> Option<DownloadToken> {
     message.set_pointer(4);
     let message_code = message.read_int8();
 
@@ -58,7 +58,7 @@ fn parse_pierce_firewall_token(message: &mut Message) -> Option<u32> {
         return None;
     }
 
-    Some(message.read_int32())
+    Some(DownloadToken(message.read_int32()))
 }
 
 fn parse_peer_init_message(mut message: Message) -> Option<PeerInitData> {
@@ -76,7 +76,7 @@ fn parse_peer_init_message(mut message: Message) -> Option<PeerInitData> {
     })
 }
 
-fn parse_token_from_buffer(buffer: &[u8], username: &str) -> Option<u32> {
+fn parse_token_from_buffer(buffer: &[u8], username: &str) -> Option<DownloadToken> {
     let token_bytes = buffer.get(0..4)?;
     let token = u32::from_le_bytes(token_bytes.try_into().unwrap_or_else(|_| {
         panic!(
@@ -84,7 +84,7 @@ fn parse_token_from_buffer(buffer: &[u8], username: &str) -> Option<u32> {
             username
         )
     }));
-    Some(token)
+    Some(DownloadToken(token))
 }
 
 fn extract_download_from_buffer(
@@ -250,7 +250,7 @@ async fn handle_incoming_connection(stream: TcpStream, context: ConnectionContex
                 peer.username.clone(),
                 peer.host.clone(),
                 peer.port,
-                token,
+                token.0,
                 true,
                 context.own_username.clone(),
             );

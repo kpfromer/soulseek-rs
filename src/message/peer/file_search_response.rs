@@ -41,7 +41,7 @@ fn test_new_from_message() {
     message.set_pointer(8);
 
     let file_search = SearchResult::new_from_message(&mut message).unwrap();
-    assert_eq!(file_search.token, 882125677);
+    assert_eq!(file_search.token, crate::token::SearchToken(882125677));
     assert_eq!(file_search.files.len(), 2);
     let file = &file_search.files[0];
     assert_eq!(

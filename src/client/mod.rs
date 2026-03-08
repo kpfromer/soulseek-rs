@@ -10,6 +10,7 @@ use crate::{
     types::{Download, Search, SearchResult},
     utils::md5,
 };
+use crate::token::{DownloadToken, SearchToken};
 use crate::{error, info, trace};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -283,7 +284,7 @@ impl Client {
         };
 
         let hash = md5::md5(query);
-        let token = u32::from_str_radix(&hash[0..5], 16)?;
+        let token = SearchToken(u32::from_str_radix(&hash[0..5], 16)?);
 
         // Insert search entry and send FileSearch
         context
@@ -405,7 +406,7 @@ impl Client {
         info!("[client] Downloading {} from {}", filename, username);
 
         let hash = md5::md5(filename.as_str());
-        let token = u32::from_str_radix(&hash[0..5], 16)?;
+        let token = DownloadToken(u32::from_str_radix(&hash[0..5], 16)?);
 
         let (download_sender, download_receiver) = mpsc::unbounded_channel::<DownloadStatus>();
 
@@ -497,9 +498,10 @@ mod tests {
 
     #[test]
     fn test_client_context_downloads() {
+        use crate::token::DownloadToken;
         let mut context = ClientContext::new();
-        let token = 123;
-        let new_token = 1234;
+        let token = DownloadToken(123);
+        let new_token = DownloadToken(1234);
         let download = Download {
             username: "test".to_string(),
             filename: SoulseekPath::from("test.txt"),
@@ -510,8 +512,8 @@ mod tests {
             sender: mpsc::unbounded_channel().0,
         };
         context.add_download(download);
-        assert!(context.get_download_by_token(123).is_some());
-        assert_eq!(context.get_download_tokens(), vec![123]);
+        assert!(context.get_download_by_token(DownloadToken(123)).is_some());
+        assert_eq!(context.get_download_tokens(), vec![DownloadToken(123)]);
         assert_eq!(context.get_downloads().len(), 1);
         if let Some(download) = context.get_download_by_token_mut(token) {
             assert_eq!(download.token, token);
@@ -521,7 +523,7 @@ mod tests {
         assert_eq!(context.get_download_tokens(), vec![new_token]);
         context.remove_download(new_token);
         assert_eq!(context.get_downloads().len(), 0);
-        assert!(context.get_download_by_token(1234).is_none());
+        assert!(context.get_download_by_token(DownloadToken(1234)).is_none());
     }
 
     #[test]

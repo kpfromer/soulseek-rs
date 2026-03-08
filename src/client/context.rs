@@ -5,6 +5,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::actor::ActorSystem;
 use crate::actor::server_actor::ServerMessage;
 use crate::peer::PeerRegistry;
+use crate::token::DownloadToken;
 use crate::types::DownloadStatus;
 use crate::types::{Download, Search};
 
@@ -46,19 +47,19 @@ impl ClientContext {
         self.downloads.push(download);
     }
 
-    pub fn remove_download(&mut self, token: u32) {
+    pub fn remove_download(&mut self, token: DownloadToken) {
         self.downloads.retain(|d| d.token != token);
     }
 
-    pub fn get_download_by_token(&self, token: u32) -> Option<&Download> {
+    pub fn get_download_by_token(&self, token: DownloadToken) -> Option<&Download> {
         self.downloads.iter().find(|d| d.token == token)
     }
 
-    pub fn get_download_by_token_mut(&mut self, token: u32) -> Option<&mut Download> {
+    pub fn get_download_by_token_mut(&mut self, token: DownloadToken) -> Option<&mut Download> {
         self.downloads.iter_mut().find(|d| d.token == token)
     }
 
-    pub fn get_download_tokens(&self) -> Vec<u32> {
+    pub fn get_download_tokens(&self) -> Vec<DownloadToken> {
         self.downloads.iter().map(|d| d.token).collect()
     }
 
@@ -66,7 +67,7 @@ impl ClientContext {
         &self.downloads
     }
 
-    pub fn update_download_with_status(&mut self, token: u32, status: DownloadStatus) {
+    pub fn update_download_with_status(&mut self, token: DownloadToken, status: DownloadStatus) {
         if let Some(download) = self.get_download_by_token_mut(token) {
             download.status = status;
         }

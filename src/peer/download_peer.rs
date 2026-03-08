@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use crate::client::ClientContext;
 use crate::message::server::MessageFactory;
+use crate::token::DownloadToken;
 use crate::trace;
 use crate::types::{Download, DownloadStatus};
 
@@ -168,11 +169,11 @@ impl DownloadPeer {
         let token_array: [u8; 4] = token_bytes
             .try_into()
             .map_err(|_| DownloadError::InvalidTokenBytes)?;
-        let token_u32 = u32::from_le_bytes(token_array);
+        let token = DownloadToken(u32::from_le_bytes(token_array));
 
         trace!(
             "[download_peer:{}] got token: {} from data chunk",
-            self.username, token_u32
+            self.username, token
         );
 
         stream
@@ -182,10 +183,10 @@ impl DownloadPeer {
         let client_guard = client_context
             .read()
             .map_err(|_| DownloadError::LockPoisoned)?;
-        let download_info = client_guard.get_download_by_token(token_u32).cloned();
+        let download_info = client_guard.get_download_by_token(token).cloned();
         drop(client_guard);
 
-        download_info.ok_or(DownloadError::TokenNotFound(token_u32))
+        download_info.ok_or(DownloadError::TokenNotFound(token.0))
     }
 
     fn open_output_file(path: &str) -> Result<io::BufWriter<fs::File>, DownloadError> {
