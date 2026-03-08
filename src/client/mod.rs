@@ -37,22 +37,6 @@ pub use inner::{ActiveConnection, ClientInner, ClientState, PendingDownload};
 pub use operation::ClientOperation;
 pub use settings::*;
 use state_monitor::{WorkerEvent, state_monitor};
-
-pub(super) struct DownloadConcurrencyLimiter {
-    max_concurrent: u32,
-    active: u32,
-    queue: VecDeque<PendingDownload>,
-}
-
-impl DownloadConcurrencyLimiter {
-    fn new(max_concurrent: u32) -> Self {
-        Self {
-            max_concurrent,
-            active: 0,
-            queue: VecDeque::new(),
-        }
-    }
-}
 pub struct Client {
     settings: ClientSettings,
     /// Single lock for all mutable state.
@@ -81,11 +65,6 @@ impl Client {
             .as_ref()
             .map(|s| SlidingRateLimiter::new(s.searches, s.per_period));
 
-        let download_limiter = settings
-            .download_rate_limit_settings
-            .as_ref()
-            .map(|s| DownloadConcurrencyLimiter::new(s.concurrent_downloads));
-
         Self {
             settings,
             inner: Arc::new(Mutex::new(ClientInner {
@@ -93,7 +72,6 @@ impl Client {
                 active: None,
                 pending_downloads: VecDeque::new(),
                 search_limiter,
-                download_limiter,
             })),
         }
     }
@@ -161,6 +139,7 @@ impl Client {
             guard.active = Some(ActiveConnection {
                 server_handle: server_handle.clone(),
                 context: context.clone(),
+                op_tx: op_tx.clone(),
             });
         }
 
@@ -202,6 +181,18 @@ impl Client {
             });
         }
 
+        // Drain any pre-connect pending downloads into the worker's queue.
+        let (pre_pending, max_concurrent) = {
+            let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            let pending: VecDeque<PendingDownload> = guard.pending_downloads.drain(..).collect();
+            let max = self
+                .settings
+                .download_rate_limit_settings
+                .as_ref()
+                .map(|s| s.concurrent_downloads);
+            (pending, max)
+        };
+
         // Spawn ConnectedWorker
         let worker = ConnectedWorker {
             own_username: username.clone(),
@@ -211,6 +202,10 @@ impl Client {
             context: context.clone(),
             cancellation_token: cancellation_token.clone(),
             server_sender: None,
+            logged_in: false,
+            pending: pre_pending,
+            max_concurrent,
+            active_downloads: 0,
         };
         tokio::spawn(async move { worker.run().await });
 
@@ -410,82 +405,29 @@ impl Client {
 
         let (download_sender, download_receiver) = mpsc::unbounded_channel::<DownloadStatus>();
 
-        let download = Download {
-            username: username.clone(),
+        let pending = PendingDownload {
             filename: filename.clone(),
-            token,
+            username: username.clone(),
             size,
-            download_directory: download_directory.clone(),
-            status: DownloadStatus::Queued,
-            sender: download_sender.clone(),
+            download_directory,
+            token,
+            status_sender: download_sender,
         };
+        let download = pending.to_download();
 
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        let is_connected = matches!(guard.state, ClientState::Connected);
 
-        // Extract context Arc before needing to borrow guard for download_limiter
-        let context_arc = guard.active.as_ref().map(|a| a.context.clone());
-
-        if let Some(context_arc) = context_arc {
-            // Add download to context regardless of connection state
-            context_arc
+        if let Some(ref active) = guard.active {
+            // Active connection exists — add to context and let the worker route it.
+            active
+                .context
                 .write()
                 .unwrap_or_else(|e| e.into_inner())
                 .add_download(download.clone());
-
-            if is_connected {
-                let mut ctx = context_arc.write().unwrap_or_else(|e| e.into_inner());
-                let initiated = if let Some(ref registry) = ctx.peer_registry {
-                    if let Some(ref mut lim) = guard.download_limiter {
-                        if lim.active < lim.max_concurrent {
-                            lim.active += 1;
-                            registry
-                                .queue_upload(&username, download.filename.clone())
-                                .is_ok()
-                        } else {
-                            lim.queue.push_back(PendingDownload {
-                                filename: filename.clone(),
-                                username: username.clone(),
-                                size,
-                                download_directory,
-                                token,
-                                status_sender: download_sender,
-                            });
-                            true
-                        }
-                    } else {
-                        registry
-                            .queue_upload(&username, download.filename.clone())
-                            .is_ok()
-                    }
-                } else {
-                    false
-                };
-
-                if !initiated {
-                    let _ = download.sender.send(DownloadStatus::Failed);
-                    ctx.update_download_with_status(token, DownloadStatus::Failed);
-                }
-            } else {
-                guard.pending_downloads.push_back(PendingDownload {
-                    filename: filename.clone(),
-                    username: username.clone(),
-                    size,
-                    download_directory,
-                    token,
-                    status_sender: download_sender,
-                });
-            }
+            let _ = active.op_tx.send(ClientOperation::RequestDownload(pending));
         } else {
-            // No active connection yet — queue for replay after first connect
-            guard.pending_downloads.push_back(PendingDownload {
-                filename: filename.clone(),
-                username: username.clone(),
-                size,
-                download_directory,
-                token,
-                status_sender: download_sender,
-            });
+            // No active connection yet — buffer until connect().
+            guard.pending_downloads.push_back(pending);
         }
 
         Ok((download, download_receiver))

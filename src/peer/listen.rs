@@ -156,24 +156,29 @@ fn handle_file_connection(
         token, peer
     );
 
-    let download = extract_download_from_buffer(
+    let Some(download) = extract_download_from_buffer(
         &mut reader,
         &context.client_context,
         &peer.username,
         peer_ip,
         peer_port,
-    );
+    ) else {
+        error!(
+            "[listener:{}:{}] No download found for file connection token: {}",
+            peer_ip, peer_port, token
+        );
+        return;
+    };
 
     let download_peer = DownloadPeer::new(
         format!("{}:direct", peer.username),
         peer.host.clone(),
         peer.port,
         token,
-        true,
         context.own_username.clone(),
     );
 
-    match download_peer.download_file(context.client_context.clone(), download, Some(stream)) {
+    match download_peer.download_direct(download, Some(stream)) {
         Ok((download, filename)) => {
             let _ = download.sender.send(DownloadStatus::Completed);
             context
@@ -251,15 +256,16 @@ async fn handle_incoming_connection(stream: TcpStream, context: ConnectionContex
                 peer.host.clone(),
                 peer.port,
                 token.0,
-                true,
                 context.own_username.clone(),
             );
 
-            match download_peer.download_file(
-                context.client_context.clone(),
-                download,
-                Some(std_stream),
-            ) {
+            // download is already resolved; use direct path
+            let Some(download) = download else {
+                error!("PierceFireWall: no download found for token {}", token);
+                return;
+            };
+
+            match download_peer.download_direct(download, Some(std_stream)) {
                 Ok((download, filename)) => {
                     let _ = download.sender.send(DownloadStatus::Completed);
                     context

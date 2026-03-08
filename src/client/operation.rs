@@ -1,4 +1,5 @@
 use crate::actor::server_actor::ServerMessage;
+use crate::client::inner::PendingDownload;
 use crate::path::SoulseekPath;
 use crate::token::DownloadToken;
 use crate::{
@@ -9,7 +10,6 @@ use crate::{
 };
 use tokio::sync::mpsc::UnboundedSender;
 
-#[derive(Debug)]
 pub enum ClientOperation {
     NewPeer(NewPeer),
     ConnectToPeer(Peer),
@@ -31,6 +31,8 @@ pub enum ClientOperation {
     ServerDisconnected,
     /// (Re)login confirmed; replay pending downloads.
     LoginSucceeded,
-    /// A download finished; dequeue next from concurrency limiter.
+    /// A download finished; dequeue next from concurrency queue.
     DownloadSlotFreed,
+    /// Initiate or queue a download; routed by ConnectedWorker.
+    RequestDownload(PendingDownload),
 }

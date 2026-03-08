@@ -1,5 +1,14 @@
+use std::collections::VecDeque;
+use std::sync::Arc;
+use std::sync::RwLock;
+
+use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::mpsc::UnboundedSender;
+use tokio_util::sync::CancellationToken;
+
 use super::state_monitor::WorkerEvent;
 use crate::actor::server_actor::ServerMessage;
+use crate::client::inner::PendingDownload;
 use crate::client::{ClientContext, ClientOperation};
 use crate::path::SoulseekPath;
 use crate::types::DownloadStatus;
@@ -8,11 +17,6 @@ use crate::{
     peer::{ConnectionType, DownloadPeer, Peer},
     types::Download,
 };
-use std::sync::Arc;
-use std::sync::RwLock;
-use tokio::sync::mpsc::UnboundedReceiver;
-use tokio::sync::mpsc::UnboundedSender;
-use tokio_util::sync::CancellationToken;
 
 /// Owns the incoming-operations loop for a live connection.
 /// Handles all `ClientOperation` messages from actors (server, peers).
@@ -27,6 +31,11 @@ pub struct ConnectedWorker {
     pub cancellation_token: CancellationToken,
     /// Sender to the ServerActor dispatcher. Populated by `SetServerSender` on first connect.
     pub server_sender: Option<UnboundedSender<ServerMessage>>,
+    // Download concurrency queue — the single source of truth for pending downloads.
+    pub logged_in: bool,
+    pub pending: VecDeque<PendingDownload>,
+    pub max_concurrent: Option<u32>,
+    pub active_downloads: u32,
 }
 
 impl ConnectedWorker {
@@ -53,18 +62,30 @@ impl ConnectedWorker {
     async fn handle_operation(&mut self, op: ClientOperation) {
         match op {
             ClientOperation::ServerDisconnected => {
+                self.logged_in = false;
                 if let Err(e) = self.event_tx.send(WorkerEvent::ServerDisconnected) {
                     error!("[worker] Failed to forward ServerDisconnected: {}", e);
                 }
             }
             ClientOperation::LoginSucceeded => {
+                self.logged_in = true;
+                self.drain_pending_queue();
                 if let Err(e) = self.event_tx.send(WorkerEvent::LoginSucceeded) {
                     error!("[worker] Failed to forward LoginSucceeded: {}", e);
                 }
             }
             ClientOperation::DownloadSlotFreed => {
+                self.active_downloads = self.active_downloads.saturating_sub(1);
+                self.try_dequeue_next();
                 if let Err(e) = self.event_tx.send(WorkerEvent::DownloadSlotFreed) {
                     error!("[worker] Failed to forward DownloadSlotFreed: {}", e);
+                }
+            }
+            ClientOperation::RequestDownload(pd) => {
+                if self.logged_in && self.max_concurrent.is_none_or(|max| self.active_downloads < max) {
+                    self.try_initiate(pd);
+                } else {
+                    self.pending.push_back(pd);
                 }
             }
             ClientOperation::ConnectToPeer(peer) => {
@@ -124,7 +145,7 @@ impl ConnectedWorker {
                     self.op_tx.clone(),
                 );
             }
-            ClientOperation::DownloadFromPeer(token, peer, allowed) => {
+            ClientOperation::DownloadFromPeer(token, peer, _allowed) => {
                 let maybe_download = {
                     let ctx = self.context.read().unwrap_or_else(|e| e.into_inner());
                     ctx.get_download_by_token(token).cloned()
@@ -146,14 +167,9 @@ impl ConnectedWorker {
                                 peer.host.clone(),
                                 peer.port,
                                 token.0,
-                                allowed,
                                 own_username,
                             );
-                            match download_peer.download_file(
-                                context.clone(),
-                                Some(download.clone()),
-                                None,
-                            ) {
+                            match download_peer.download_direct(download.clone(), None) {
                                 Ok((download, path)) => {
                                     let _ = download.sender.send(DownloadStatus::Completed);
                                     context
@@ -314,6 +330,42 @@ impl ConnectedWorker {
         }
     }
 
+    /// Initiate a download: add to context and queue upload with the peer registry.
+    fn try_initiate(&mut self, pd: PendingDownload) {
+        let mut ctx = self.context.write().unwrap_or_else(|e| e.into_inner());
+        ctx.add_download(pd.to_download());
+        if let Some(ref registry) = ctx.peer_registry {
+            let _ = registry.queue_upload(&pd.username, pd.filename.clone());
+            self.active_downloads += 1;
+        }
+    }
+
+    /// Drain pending queue up to the concurrency limit.
+    fn drain_pending_queue(&mut self) {
+        loop {
+            if self.max_concurrent.is_some_and(|max| self.active_downloads >= max) {
+                break;
+            }
+            match self.pending.pop_front() {
+                Some(pd) => self.try_initiate(pd),
+                None => break,
+            }
+        }
+    }
+
+    /// Dequeue and initiate the next pending download if a slot is available.
+    fn try_dequeue_next(&mut self) {
+        if !self.logged_in {
+            return;
+        }
+        if self.max_concurrent.is_some_and(|max| self.active_downloads >= max) {
+            return;
+        }
+        if let Some(pd) = self.pending.pop_front() {
+            self.try_initiate(pd);
+        }
+    }
+
     fn process_failed_uploads(
         context: Arc<RwLock<ClientContext>>,
         username: &str,
@@ -375,11 +427,19 @@ impl ConnectedWorker {
                     peer.host,
                     peer.port,
                     peer.token.unwrap().0,
-                    false,
                     own_username,
                 );
                 tokio::task::spawn_blocking(move || {
-                    match download_peer.download_file(context.clone(), None, stream) {
+                    let resolve = {
+                        let ctx = context.clone();
+                        move |token| {
+                            ctx.read()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .get_download_by_token(token)
+                                .cloned()
+                        }
+                    };
+                    match download_peer.download_pierced(resolve, stream) {
                         Ok((download, filename)) => {
                             trace!("[worker] downloaded {} bytes {:?}", filename, download.size);
                             let _ = download.sender.send(DownloadStatus::Completed);
