@@ -45,8 +45,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (i, (file, speed)) in files.iter().take(display_count).enumerate() {
         let size_mb = file.size as f64 / 1_048_576.0;
         let name = file.name.filename();
+        let duration = file
+            .attributes
+            .duration
+            .map(|duration| format!(", {duration}s"))
+            .unwrap_or_default();
         println!(
-            "[{i}] {name} ({size_mb:.1} MB, {speed} KB/s) - {}",
+            "[{i}] {name} ({size_mb:.1} MB, {speed} KB/s{duration}) - {}",
             file.username
         );
     }
