@@ -373,25 +373,27 @@ impl ConnectedWorker {
                     false,
                     own_username,
                 );
-                match download_peer.download_file(context.clone(), None, stream) {
-                    Ok((download, filename)) => {
-                        trace!("[worker] downloaded {} bytes {:?}", filename, download.size);
-                        let _ = download.sender.send(DownloadStatus::Completed);
-                        context
-                            .write()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .update_download_with_status(download.token, DownloadStatus::Completed);
+                tokio::task::spawn_blocking(move || {
+                    match download_peer.download_file(context.clone(), None, stream) {
+                        Ok((download, filename)) => {
+                            trace!("[worker] downloaded {} bytes {:?}", filename, download.size);
+                            let _ = download.sender.send(DownloadStatus::Completed);
+                            context
+                                .write()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .update_download_with_status(download.token, DownloadStatus::Completed);
+                        }
+                        Err(e) => {
+                            trace!("[worker] failed to download: {}", e);
+                        }
                     }
-                    Err(e) => {
-                        trace!("[worker] failed to download: {}", e);
+                    // Signal download slot freed
+                    if let Ok(ctx) = context.read() {
+                        if let Some(ref sender) = ctx.sender {
+                            let _ = sender.send(ClientOperation::DownloadSlotFreed);
+                        }
                     }
-                }
-                // Signal download slot freed
-                if let Ok(ctx) = context.read() {
-                    if let Some(ref sender) = ctx.sender {
-                        let _ = sender.send(ClientOperation::DownloadSlotFreed);
-                    }
-                }
+                });
             }
             ConnectionType::D => {
                 error!("ConnectionType::D not implemented")

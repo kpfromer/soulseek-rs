@@ -373,7 +373,6 @@ impl ServerActor {
         handlers.register_handler(WishListIntervalHandler);
         handlers.register_handler(ParentMinSpeedHandler);
         handlers.register_handler(ParentSpeedRatioHandler);
-        handlers.register_handler(PrivilegedUsersHandler);
         handlers.register_handler(FileSearchHandler);
         handlers.register_handler(GetPeerAddressHandler);
         handlers.register_handler(ConnectToPeerHandler);
