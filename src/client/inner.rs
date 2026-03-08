@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 
 use crate::DownloadStatus;
-use crate::actor::ActorHandle;
+use crate::actor::{ActorHandle, ActorSystem};
 use crate::actor::server_actor::ServerMessage;
 use crate::client::ClientContext;
 use crate::client::ClientOperation;
@@ -50,6 +50,8 @@ pub struct ActiveConnection {
     pub context: Arc<RwLock<ClientContext>>,
     /// Sender to the ConnectedWorker operations channel.
     pub op_tx: UnboundedSender<ClientOperation>,
+    /// Actor system — used for shutdown.
+    pub actor_system: Arc<ActorSystem>,
 }
 
 /// All mutable state behind a single lock.

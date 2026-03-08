@@ -81,9 +81,7 @@ impl Client {
     pub fn shutdown(&self) {
         let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(ref active) = guard.active {
-            if let Ok(ctx) = active.context.read() {
-                ctx.actor_system.shutdown();
-            }
+            active.actor_system.shutdown();
         }
     }
 
@@ -100,100 +98,35 @@ impl Client {
 
         let username = self.settings.username.0.clone();
         let password = self.settings.password.0.clone();
+        let max_concurrent = self
+            .settings
+            .download_rate_limit_settings
+            .as_ref()
+            .map(|s| s.concurrent_downloads);
+
+        // Create actor_system upfront — no lock needed later to retrieve it.
+        let actor_system = Arc::new(crate::actor::ActorSystem::new());
+        let cancellation_token = actor_system.cancellation_token().clone();
 
         let (op_tx, op_rx) = mpsc::unbounded_channel::<ClientOperation>();
         let (event_tx, event_rx) = mpsc::unbounded_channel::<WorkerEvent>();
 
-        // Build context
-        let context = Arc::new(RwLock::new(ClientContext::new()));
-        {
-            let mut ctx = context.write().unwrap_or_else(|e| e.into_inner());
+        // Build fully-initialized context before spawning anything.
+        let context = {
             let peer_registry =
-                PeerRegistry::new(ctx.actor_system.clone(), op_tx.clone(), username.clone());
+                PeerRegistry::new(actor_system.clone(), op_tx.clone(), username.clone());
+            let mut ctx = ClientContext::new();
             ctx.peer_registry = Some(peer_registry);
-        }
-
-        // Spawn ServerActor
-        let server_actor = ServerActor::new(
-            self.settings.server_address.clone(),
-            op_tx.clone(),
-            self.settings.listen_port,
-            self.settings.enable_listen,
-            self.settings.tcp_keepalive_settings.clone(),
-            self.settings.reconnect_settings.clone(),
-        );
-
-        let actor_system = context
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .actor_system
-            .clone();
-
-        let server_handle = actor_system.spawn_with_handle(server_actor, |actor, handle| {
-            actor.set_self_handle(handle);
-        });
-
-        // Store active connection
-        {
-            let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-            guard.active = Some(ActiveConnection {
-                server_handle: server_handle.clone(),
-                context: context.clone(),
-                op_tx: op_tx.clone(),
-            });
-        }
-
-        // Send Login — queued by ServerActor until TCP is ready
-        let (login_tx, login_rx) = tokio::sync::oneshot::channel();
-        let _ = server_handle.send(ServerMessage::Login {
-            username: username.clone(),
-            password: password.clone(),
-            response: login_tx,
-        });
-
-        let cancellation_token = actor_system.cancellation_token().clone();
-
-        // Spawn listener task
-        if self.settings.enable_listen {
-            let listen_port = self.settings.listen_port;
-            let client_sender = op_tx.clone();
-            let context_clone = context.clone();
-            let own_username = username.clone();
-            let token = cancellation_token.clone();
-
-            tokio::spawn(async move {
-                tokio::select! {
-                    _ = token.cancelled() => {
-                        trace!("[listener] Shutdown signal received");
-                    }
-                    result = Listen::start(
-                        listen_port,
-                        client_sender,
-                        context_clone,
-                        own_username,
-                    ) => {
-                        match result {
-                            Ok(_) => info!("[listener] Listener started successfully"),
-                            Err(e) => error!("[listener] Failed to start listener: {}", e),
-                        }
-                    }
-                }
-            });
-        }
-
-        // Drain any pre-connect pending downloads into the worker's queue.
-        let (pre_pending, max_concurrent) = {
-            let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-            let pending: VecDeque<PendingDownload> = guard.pending_downloads.drain(..).collect();
-            let max = self
-                .settings
-                .download_rate_limit_settings
-                .as_ref()
-                .map(|s| s.concurrent_downloads);
-            (pending, max)
+            Arc::new(RwLock::new(ctx))
         };
 
-        // Spawn ConnectedWorker
+        // Drain any pre-connect pending downloads into the worker's queue.
+        let pre_pending = {
+            let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            guard.pending_downloads.drain(..).collect::<VecDeque<_>>()
+        };
+
+        // Spawn ConnectedWorker FIRST so it is already consuming op_tx when ServerActor starts.
         let worker = ConnectedWorker {
             own_username: username.clone(),
             op_tx: op_tx.clone(),
@@ -213,12 +146,63 @@ impl Client {
         let inner_clone = self.inner.clone();
         tokio::spawn(async move { state_monitor(event_rx, inner_clone).await });
 
-        // Await login result
+        // Spawn ServerActor — starts sending to op_tx; worker is already running.
+        let server_actor = ServerActor::new(
+            self.settings.server_address.clone(),
+            op_tx.clone(),
+            self.settings.listen_port,
+            self.settings.enable_listen,
+            self.settings.tcp_keepalive_settings.clone(),
+            self.settings.reconnect_settings.clone(),
+        );
+
+        let server_handle = actor_system.spawn_with_handle(server_actor, |actor, handle| {
+            actor.set_self_handle(handle);
+        });
+
+        // Store active connection (after server handle exists).
+        {
+            let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            guard.active = Some(ActiveConnection {
+                server_handle: server_handle.clone(),
+                context: context.clone(),
+                op_tx: op_tx.clone(),
+                actor_system: actor_system.clone(),
+            });
+        }
+
+        // Spawn listener task
+        if self.settings.enable_listen {
+            let listen_port = self.settings.listen_port;
+            let own_username = username.clone();
+            let token = cancellation_token.clone();
+
+            tokio::spawn(async move {
+                tokio::select! {
+                    _ = token.cancelled() => {
+                        trace!("[listener] Shutdown signal received");
+                    }
+                    result = Listen::start(listen_port, op_tx, context, own_username) => {
+                        match result {
+                            Ok(_) => info!("[listener] Listener started successfully"),
+                            Err(e) => error!("[listener] Failed to start listener: {}", e),
+                        }
+                    }
+                }
+            });
+        }
+
+        // Send Login — queued by ServerActor until TCP is ready.
+        let (login_tx, login_rx) = tokio::sync::oneshot::channel();
+        let _ = server_handle.send(ServerMessage::Login {
+            username: username.clone(),
+            password: password.clone(),
+            response: login_tx,
+        });
+
+        // Await login result. ClientState::Connected is set by state_monitor on LoginSucceeded.
         match login_rx.await {
-            Ok(Ok(true)) => {
-                self.inner.lock().unwrap_or_else(|e| e.into_inner()).state = ClientState::Connected;
-                Ok(())
-            }
+            Ok(Ok(true)) => Ok(()),
             Ok(Err(e)) => Err(e),
             Ok(Ok(false)) => Err(SoulseekRs::AuthenticationFailed),
             Err(_) => Err(SoulseekRs::Timeout),
