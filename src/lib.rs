@@ -13,7 +13,7 @@ pub mod utils;
 // Prelude module for commonly used items
 pub mod prelude {
     pub use crate::actor::server_actor::PeerAddress;
-    pub use crate::types::{DownloadStatus, File, Search, SearchResult, Transfer};
+    pub use crate::types::{DownloadStatus, File, FileAttributes, Search, SearchResult, Transfer};
     pub use crate::{debug, error, info, trace, warn};
 }
 
@@ -21,4 +21,4 @@ pub mod prelude {
 pub use actor::server_actor::PeerAddress;
 pub use client::{Client, ClientSettings};
 pub use error::{Result, SoulseekRs};
-pub use types::{DownloadStatus, File, Search, SearchResult, Transfer};
+pub use types::{DownloadStatus, File, FileAttributes, Search, SearchResult, Transfer};

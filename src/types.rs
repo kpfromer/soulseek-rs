@@ -4,13 +4,34 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{error::Result, message::Message, utils::zlib::deflate};
 
+#[derive(Debug, Clone, Default)]
+pub struct FileAttributes {
+    pub bitrate: Option<u32>,     // kbps (code 0)
+    pub duration: Option<u32>,    // seconds (code 1)
+    pub vbr: Option<bool>,        // variable bit rate flag (code 2)
+    pub sample_rate: Option<u32>, // Hz (code 4)
+    pub bit_depth: Option<u32>,   // bits (code 5)
+}
+
+impl FileAttributes {
+    fn from_map(map: HashMap<u32, u32>) -> Self {
+        Self {
+            bitrate: map.get(&0).copied(),
+            duration: map.get(&1).copied(),
+            vbr: map.get(&2).map(|&v| v != 0),
+            sample_rate: map.get(&4).copied(),
+            bit_depth: map.get(&5).copied(),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct File {
     pub username: String,
     pub name: String,
     pub size: u64,
-    pub attribs: HashMap<u32, u32>,
+    pub attributes: FileAttributes,
 }
 pub struct UploadFailed {
     pub filename: String,
@@ -65,7 +86,7 @@ impl SearchResult {
                 username: username.clone(),
                 name,
                 size,
-                attribs,
+                attributes: FileAttributes::from_map(attribs),
             });
         }
         let slots = message.read_int8();
