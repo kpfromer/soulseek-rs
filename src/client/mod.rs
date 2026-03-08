@@ -1,4 +1,5 @@
 use crate::actor::server_actor::{ServerActor, ServerMessage};
+use crate::path::SoulseekPath;
 use crate::search_rate_limiter::SlidingRateLimiter;
 use crate::types::DownloadStatus;
 use crate::utils::logger;
@@ -395,14 +396,15 @@ impl Client {
 
     pub fn download(
         &self,
-        filename: String,
+        filename: impl Into<SoulseekPath>,
         username: String,
         size: u64,
         download_directory: String,
     ) -> Result<(Download, UnboundedReceiver<DownloadStatus>)> {
+        let filename: SoulseekPath = filename.into();
         info!("[client] Downloading {} from {}", filename, username);
 
-        let hash = md5::md5(&filename);
+        let hash = md5::md5(filename.as_str());
         let token = u32::from_str_radix(&hash[0..5], 16)?;
 
         let (download_sender, download_receiver) = mpsc::unbounded_channel::<DownloadStatus>();
@@ -500,7 +502,7 @@ mod tests {
         let new_token = 1234;
         let download = Download {
             username: "test".to_string(),
-            filename: "test.txt".to_string(),
+            filename: SoulseekPath::from("test.txt"),
             token,
             size: 100,
             download_directory: "test".to_string(),

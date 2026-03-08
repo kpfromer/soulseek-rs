@@ -12,8 +12,7 @@ use crate::message::server::MessageFactory;
 use crate::trace;
 use crate::types::{Download, DownloadStatus};
 
-const START_DOWNLOAD: [u8; 8] =
-    [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+const START_DOWNLOAD: [u8; 8] = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
 const READ_BUFFER_SIZE: usize = 8192;
 const PROGRESS_UPDATE_CHUNKS: usize = 15; // ~120KB (15 * 8192 bytes)
 
@@ -82,23 +81,7 @@ impl FileManager {
             PathBuf::from(path)
         }
     }
-
-    fn extract_filename_from_path(full_path: &str) -> &str {
-        full_path
-            .split(['/', '\\'])
-            .next_back()
-            .unwrap_or(full_path)
-    }
-
-    fn create_download_path_from_filename(
-        output_directory: PathBuf,
-        filename: &str,
-    ) -> PathBuf {
-        let filename_only = Self::extract_filename_from_path(filename);
-        output_directory.join(filename_only)
-    }
 }
-
 
 pub struct DownloadPeer {
     username: String,
@@ -135,18 +118,10 @@ impl DownloadPeer {
             .to_socket_addrs()
             .map_err(DownloadError::ConnectionFailed)?
             .next()
-            .ok_or_else(|| {
-                DownloadError::InvalidAddress(format!(
-                    "{}:{}",
-                    self.host, self.port
-                ))
-            })?;
+            .ok_or_else(|| DownloadError::InvalidAddress(format!("{}:{}", self.host, self.port)))?;
 
-        let stream = TcpStream::connect_timeout(
-            &socket_address,
-            Duration::from_secs(20),
-        )
-        .map_err(DownloadError::ConnectionFailed)?;
+        let stream = TcpStream::connect_timeout(&socket_address, Duration::from_secs(20))
+            .map_err(DownloadError::ConnectionFailed)?;
 
         stream
             .set_read_timeout(Some(Duration::from_secs(30)))
@@ -161,18 +136,14 @@ impl DownloadPeer {
         Ok(stream)
     }
 
-    fn perform_handshake(
-        &self,
-        stream: &mut TcpStream,
-    ) -> Result<(), DownloadError> {
+    fn perform_handshake(&self, stream: &mut TcpStream) -> Result<(), DownloadError> {
         trace!(
             "[download_peer:{}] performing handshake no_pierce: {}",
             self.username, self.no_pierce
         );
 
         if !self.no_pierce {
-            let message =
-                MessageFactory::build_pierce_firewall_message(self.token);
+            let message = MessageFactory::build_pierce_firewall_message(self.token);
             stream
                 .write_all(&message.get_buffer())
                 .map_err(DownloadError::HandshakeFailed)?;
@@ -193,8 +164,7 @@ impl DownloadPeer {
         stream: &mut TcpStream,
         client_context: &Arc<RwLock<ClientContext>>,
     ) -> Result<Download, DownloadError> {
-        let token_bytes =
-            data.get(0..4).ok_or(DownloadError::InvalidTokenBytes)?;
+        let token_bytes = data.get(0..4).ok_or(DownloadError::InvalidTokenBytes)?;
         let token_array: [u8; 4] = token_bytes
             .try_into()
             .map_err(|_| DownloadError::InvalidTokenBytes)?;
@@ -212,8 +182,7 @@ impl DownloadPeer {
         let client_guard = client_context
             .read()
             .map_err(|_| DownloadError::LockPoisoned)?;
-        let download_info =
-            client_guard.get_download_by_token(token_u32).cloned();
+        let download_info = client_guard.get_download_by_token(token_u32).cloned();
         drop(client_guard);
 
         download_info.ok_or(DownloadError::TokenNotFound(token_u32))
@@ -271,12 +240,8 @@ impl DownloadPeer {
                     let data = &read_buffer[..bytes_read];
 
                     if !self.no_pierce && !received_handshake {
-                        let new_download = self
-                            .handle_pierce_firewall_response(
-                                data,
-                                stream,
-                                client_context,
-                            )?;
+                        let new_download =
+                            self.handle_pierce_firewall_response(data, stream, client_context)?;
                         trace!(
                             "[download_peer:{}] got download info for token: {} - filename: {}",
                             self.username, self.token, new_download.filename
@@ -291,14 +256,22 @@ impl DownloadPeer {
                         // Any bytes after the 4-byte token are the start of file data.
                         if data.len() > 4 {
                             let chunk = &data[4..];
-                            writer.as_mut().unwrap().write_all(chunk).map_err(DownloadError::FileWriteError)?;
+                            writer
+                                .as_mut()
+                                .unwrap()
+                                .write_all(chunk)
+                                .map_err(DownloadError::FileWriteError)?;
                             total_bytes += chunk.len();
                             chunk_counter += 1;
                         }
                         continue;
                     }
 
-                    writer.as_mut().unwrap().write_all(data).map_err(DownloadError::FileWriteError)?;
+                    writer
+                        .as_mut()
+                        .unwrap()
+                        .write_all(data)
+                        .map_err(DownloadError::FileWriteError)?;
                     total_bytes += bytes_read;
                     chunk_counter += 1;
 
@@ -306,8 +279,7 @@ impl DownloadPeer {
                         && chunk_counter % PROGRESS_UPDATE_CHUNKS == 0
                     {
                         let elapsed = last_update_time.elapsed().as_secs_f64();
-                        let bytes_since_last_update =
-                            PROGRESS_UPDATE_CHUNKS * READ_BUFFER_SIZE;
+                        let bytes_since_last_update = PROGRESS_UPDATE_CHUNKS * READ_BUFFER_SIZE;
                         let speed = if elapsed > 0.0 {
                             bytes_since_last_update as f64 / elapsed
                         } else {
@@ -357,10 +329,7 @@ impl DownloadPeer {
         Ok((total_bytes, download, final_path))
     }
 
-    fn resolve_download_path(
-        &self,
-        download: &Download,
-    ) -> Result<String, DownloadError> {
+    fn resolve_download_path(&self, download: &Download) -> Result<String, DownloadError> {
         let download_directory = &download.download_directory;
         let mut expanded_path = FileManager::expand_path(download_directory);
 
@@ -376,10 +345,7 @@ impl DownloadPeer {
                 .to_path_buf();
         }
 
-        let final_path = FileManager::create_download_path_from_filename(
-            expanded_path,
-            &download.filename,
-        );
+        let final_path = expanded_path.join(download.filename.filename());
 
         final_path
             .to_str()
@@ -429,9 +395,7 @@ impl DownloadPeer {
 
         trace!(
             "[download_peer:{}] download completed successfully: {} bytes, saved to: {}",
-            self.username,
-            total_bytes,
-            final_path
+            self.username, total_bytes, final_path
         );
 
         Ok((download, final_path))
@@ -440,7 +404,7 @@ impl DownloadPeer {
 
 #[cfg(test)]
 mod tests {
-    use super::{DownloadPeer, FileManager};
+    use super::DownloadPeer;
 
     #[test]
     fn test_establish_connection_invalid_address() {
@@ -454,27 +418,5 @@ mod tests {
         );
         let result = download_peer.establish_connection();
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_extract_filename_from_path() {
-        assert_eq!(
-            FileManager::extract_filename_from_path("/path/to/file.mp3"),
-            "file.mp3"
-        );
-        assert_eq!(
-            FileManager::extract_filename_from_path("C:\\path\\to\\file.mp3"),
-            "file.mp3"
-        );
-        assert_eq!(
-            FileManager::extract_filename_from_path(
-                "@@bhfrv\\Soulseek Downloads\\complete\\Beatport Top Deep House (2021)\\michel test file.mp3"
-            ),
-            "michel test file.mp3"
-        );
-        assert_eq!(
-            FileManager::extract_filename_from_path("file.mp3"),
-            "file.mp3"
-        );
     }
 }

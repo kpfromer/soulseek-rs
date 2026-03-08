@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::{error::Result, message::Message, utils::zlib::deflate};
+use crate::{error::Result, message::Message, path::SoulseekPath, utils::zlib::deflate};
 
 #[derive(Debug, Clone, Default)]
 pub struct FileAttributes {
@@ -29,16 +29,16 @@ impl FileAttributes {
 #[allow(dead_code)]
 pub struct File {
     pub username: String,
-    pub name: String,
+    pub name: SoulseekPath,
     pub size: u64,
     pub attributes: FileAttributes,
 }
 pub struct UploadFailed {
-    pub filename: String,
+    pub filename: SoulseekPath,
 }
 impl UploadFailed {
     pub fn new_from_message(message: &mut Message) -> Self {
-        let filename = message.read_string();
+        let filename = SoulseekPath::from_wire(message.read_string());
 
         Self { filename }
     }
@@ -84,7 +84,7 @@ impl SearchResult {
             }
             files.push(File {
                 username: username.clone(),
-                name,
+                name: SoulseekPath::from_wire(name),
                 size,
                 attributes: FileAttributes::from_map(attribs),
             });
@@ -107,13 +107,13 @@ impl SearchResult {
 pub struct Transfer {
     pub direction: u32,
     pub token: u32,
-    pub filename: String,
+    pub filename: SoulseekPath,
     pub size: u64,
 }
 #[derive(Debug, Clone)]
 pub struct Download {
     pub username: String,
-    pub filename: String,
+    pub filename: SoulseekPath,
     pub token: u32,
     pub size: u64,
     pub download_directory: String,
@@ -125,9 +125,7 @@ impl Download {
     pub fn is_finished(&self) -> bool {
         matches!(
             self.status,
-            DownloadStatus::Completed
-                | DownloadStatus::Failed
-                | DownloadStatus::TimedOut
+            DownloadStatus::Completed | DownloadStatus::Failed | DownloadStatus::TimedOut
         )
     }
 
@@ -169,7 +167,7 @@ impl Transfer {
     pub fn new_from_message(message: &mut Message) -> Self {
         let direction = message.read_int32();
         let token = message.read_int32();
-        let filename = message.read_string();
+        let filename = SoulseekPath::from_wire(message.read_string());
         let size = message.read_int64();
 
         Self {

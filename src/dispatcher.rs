@@ -10,11 +10,7 @@ pub struct MessageDispatcher<Op> {
 }
 
 impl<Op> MessageDispatcher<Op> {
-    pub fn new(
-        owner_name: String,
-        sender: UnboundedSender<Op>,
-        handlers: Handlers<Op>,
-    ) -> Self {
+    pub fn new(owner_name: String, sender: UnboundedSender<Op>, handlers: Handlers<Op>) -> Self {
         MessageDispatcher {
             owner_name,
             sender,

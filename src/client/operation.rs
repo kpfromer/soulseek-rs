@@ -1,4 +1,5 @@
 use crate::actor::server_actor::ServerMessage;
+use crate::path::SoulseekPath;
 use crate::{
     Transfer,
     error::SoulseekRs,
@@ -23,7 +24,7 @@ pub enum ClientOperation {
         obfuscation_type: u32,
         obfuscated_port: u16,
     },
-    UploadFailed(String, String),
+    UploadFailed(String, SoulseekPath),
     SetServerSender(UnboundedSender<ServerMessage>),
     /// Server TCP connection was lost; reconnect will be handled by ServerActor.
     ServerDisconnected,

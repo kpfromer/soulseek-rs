@@ -54,10 +54,7 @@ pub fn init() {
                     }
                 }
                 Err(e) => {
-                    eprintln!(
-                        "Failed to open log file '{}': {}",
-                        log_file_path, e
-                    );
+                    eprintln!("Failed to open log file '{}': {}", log_file_path, e);
                 }
             }
         }
@@ -89,8 +86,7 @@ pub fn log(level: LogLevel, message: &str) {
             let mut remaining_days = days_since_1970;
 
             while remaining_days >= 365 {
-                let is_leap =
-                    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+                let is_leap = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
                 let days_in_year = if is_leap { 366 } else { 365 };
                 if remaining_days >= days_in_year {
                     remaining_days -= days_in_year;
@@ -102,8 +98,7 @@ pub fn log(level: LogLevel, message: &str) {
 
             // Calculate month and day (simplified)
             let month_days = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-            let is_leap =
-                (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+            let is_leap = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
             let mut month = 1;
             let mut day = remaining_days + 1;
 
@@ -137,28 +132,12 @@ pub fn log(level: LogLevel, message: &str) {
 
             let formatted_message = format!(
                 "[{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}] [{}] {}",
-                year,
-                month,
-                day,
-                hours,
-                minutes,
-                seconds,
-                subsec_millis,
-                level_str,
-                message
+                year, month, day, hours, minutes, seconds, subsec_millis, level_str, message
             );
 
             let formatted_message_plain = format!(
                 "[{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}] [{}] {}",
-                year,
-                month,
-                day,
-                hours,
-                minutes,
-                seconds,
-                subsec_millis,
-                level_str_plain,
-                message
+                year, month, day, hours, minutes, seconds, subsec_millis, level_str_plain, message
             );
 
             if BUFFERING.load(Ordering::Relaxed) {

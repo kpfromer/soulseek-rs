@@ -1,6 +1,4 @@
-use crate::{
-    actor::server_actor::ServerMessage, debug, info, message::Message,
-};
+use crate::{actor::server_actor::ServerMessage, debug, info, message::Message};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::message::MessageHandler;

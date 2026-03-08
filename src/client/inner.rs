@@ -5,6 +5,7 @@ use crate::actor::ActorHandle;
 use crate::actor::server_actor::ServerMessage;
 use crate::client::ClientContext;
 use crate::client::DownloadConcurrencyLimiter;
+use crate::path::SoulseekPath;
 use crate::search_rate_limiter::SlidingRateLimiter;
 use std::sync::Arc;
 use std::sync::RwLock;
@@ -18,7 +19,7 @@ pub enum ClientState {
 
 #[allow(dead_code)]
 pub struct PendingDownload {
-    pub filename: String,
+    pub filename: SoulseekPath,
     pub username: String,
     pub size: u64,
     pub download_directory: String,

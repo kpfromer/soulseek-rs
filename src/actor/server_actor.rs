@@ -80,15 +80,10 @@ impl UserMessage {
     pub fn print(&self) {
         debug!(
             "Timestamp: {}. User: {}, Id: #{}, New message: {} Message: {}",
-            self.timestamp,
-            self.username,
-            self.id,
-            self.new_message,
-            self.message
+            self.timestamp, self.username, self.id, self.new_message, self.message
         );
     }
 }
-
 
 #[derive(Debug)]
 pub enum ServerMessage {
@@ -192,10 +187,7 @@ impl ServerActor {
             Err(e) => {
                 error!("[server] Failed to resolve address: {}", e);
 
-                self.disconnect_with_error(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    e,
-                ));
+                self.disconnect_with_error(io::Error::new(io::ErrorKind::InvalidInput, e));
                 return false;
             }
         };
@@ -248,13 +240,9 @@ impl ServerActor {
                 }
             }
             None => {
-                let error_msg =
-                    format!("No socket addresses found for {}:{}", host, port);
+                let error_msg = format!("No socket addresses found for {}:{}", host, port);
                 error!("[server] {}", error_msg);
-                self.disconnect_with_error(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    error_msg,
-                ));
+                self.disconnect_with_error(io::Error::new(io::ErrorKind::InvalidInput, error_msg));
                 false
             }
         }
@@ -265,8 +253,7 @@ impl ServerActor {
     }
 
     fn initialize_dispatcher(&mut self) {
-        let (dispatcher_sender, dispatcher_receiver) =
-            mpsc::unbounded_channel::<ServerMessage>();
+        let (dispatcher_sender, dispatcher_receiver) = mpsc::unbounded_channel::<ServerMessage>();
 
         self.dispatcher_receiver = Some(dispatcher_receiver);
         self.dispatcher_sender = Some(dispatcher_sender.clone());
@@ -300,16 +287,16 @@ impl ServerActor {
     }
 
     fn process_dispatcher_messages(&mut self) {
-        let messages: Vec<ServerMessage> = self
-            .dispatcher_receiver
-            .as_mut()
-            .map_or_else(Vec::new, |receiver| {
-                let mut msgs = Vec::new();
-                while let Ok(msg) = receiver.try_recv() {
-                    msgs.push(msg);
-                }
-                msgs
-            });
+        let messages: Vec<ServerMessage> =
+            self.dispatcher_receiver
+                .as_mut()
+                .map_or_else(Vec::new, |receiver| {
+                    let mut msgs = Vec::new();
+                    while let Ok(msg) = receiver.try_recv() {
+                        msgs.push(msg);
+                    }
+                    msgs
+                });
 
         for msg in messages {
             self.handle_message(msg);
@@ -317,9 +304,7 @@ impl ServerActor {
     }
 
     pub fn file_search(&mut self, token: u32, query: &str) {
-        self.queue_message(MessageFactory::build_file_search_message(
-            token, query,
-        ));
+        self.queue_message(MessageFactory::build_file_search_message(token, query));
     }
 
     fn handle_message(&mut self, msg: ServerMessage) {
@@ -367,43 +352,29 @@ impl ServerActor {
                     self.last_disconnect = None;
 
                     // Notify client that login succeeded (used for reconnect path)
-                    if let Err(e) =
-                        self.client_channel.send(ClientOperation::LoginSucceeded)
-                    {
+                    if let Err(e) = self.client_channel.send(ClientOperation::LoginSucceeded) {
                         error!("[server] Failed to send LoginSucceeded: {}", e);
                     }
 
                     // Post-login setup: tell the server about ourselves
-                    self.queue_message(
-                        MessageFactory::build_shared_folders_message(1, 499),
-                    );
-                    self.queue_message(
-                        MessageFactory::build_no_parent_message(),
-                    );
-                    self.queue_message(
-                        MessageFactory::build_set_status_message(2),
-                    );
+                    self.queue_message(MessageFactory::build_shared_folders_message(1, 499));
+                    self.queue_message(MessageFactory::build_no_parent_message());
+                    self.queue_message(MessageFactory::build_set_status_message(2));
                     if self.enable_listen {
-                        self.queue_message(
-                            MessageFactory::build_set_wait_port_message(
-                                self.listen_port,
-                            ),
-                        );
+                        self.queue_message(MessageFactory::build_set_wait_port_message(
+                            self.listen_port,
+                        ));
                     }
                 }
             }
             ServerMessage::PierceFirewall(token) => {
-                self.send_message(
-                    MessageFactory::build_pierce_firewall_message(token),
-                );
+                self.send_message(MessageFactory::build_pierce_firewall_message(token));
             }
             ServerMessage::SendMessage(message) => {
                 self.send_message(message);
             }
             ServerMessage::GetPeerAddress(username) => {
-                self.send_message(MessageFactory::build_get_peer_address(
-                    &username,
-                ));
+                self.send_message(MessageFactory::build_get_peer_address(&username));
             }
             ServerMessage::GetPeerAddressResponse {
                 username,
@@ -417,15 +388,16 @@ impl ServerActor {
                     username, host, port, obfuscation_type, obfuscated_port
                 );
 
-                if let Err(e) = self.client_channel.send(
-                    ClientOperation::GetPeerAddressResponse {
+                if let Err(e) = self
+                    .client_channel
+                    .send(ClientOperation::GetPeerAddressResponse {
                         username,
                         host,
                         port,
                         obfuscation_type,
                         obfuscated_port,
-                    },
-                ) {
+                    })
+                {
                     error!(
                         "[server] Error forwarding GetPeerAddress response to client: {}",
                         e
@@ -443,9 +415,7 @@ impl ServerActor {
                 // Store credentials for reconnect
                 self.credentials = Some((username.clone(), password.clone()));
 
-                self.queue_message(MessageFactory::build_login_message(
-                    &username, &password,
-                ));
+                self.queue_message(MessageFactory::build_login_message(&username, &password));
 
                 // Park the caller's oneshot; resolved immediately when LoginStatus arrives
                 // or timed out via tick().
@@ -520,10 +490,7 @@ impl ServerActor {
                     }
                 }
                 Err(e) => {
-                    warn!(
-                        "[server] Error extracting message: {}. Disconnecting.",
-                        e
-                    );
+                    warn!("[server] Error extracting message: {}. Disconnecting.", e);
                     self.disconnect_with_error(e);
                     return;
                 }
@@ -562,9 +529,7 @@ impl ServerActor {
             message
                 .get_message_name(
                     MessageType::Server,
-                    u32::from_le_bytes(
-                        message.get_slice(0, 4).try_into().unwrap()
-                    )
+                    u32::from_le_bytes(message.get_slice(0, 4).try_into().unwrap())
                 )
                 .map_err(|e| e.to_string())
         );
@@ -607,7 +572,10 @@ impl ServerActor {
                 let _ = tx.send(Err(SoulseekRs::ConnectionClosed));
             }
 
-            if let Err(e) = self.client_channel.send(ClientOperation::ServerDisconnected) {
+            if let Err(e) = self
+                .client_channel
+                .send(ClientOperation::ServerDisconnected)
+            {
                 error!("[server] Failed to send ServerDisconnected: {}", e);
             }
         }
@@ -620,8 +588,7 @@ impl ServerActor {
     }
 
     fn check_connection_status(&mut self) {
-        let ConnectionState::Connecting { since } = self.connection_state
-        else {
+        let ConnectionState::Connecting { since } = self.connection_state else {
             return;
         };
 

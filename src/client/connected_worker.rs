@@ -1,12 +1,13 @@
 use super::state_monitor::WorkerEvent;
 use crate::actor::server_actor::ServerMessage;
 use crate::client::{ClientContext, ClientOperation};
+use crate::path::SoulseekPath;
 use crate::types::DownloadStatus;
+use crate::{debug, error, info, trace, warn};
 use crate::{
     peer::{ConnectionType, DownloadPeer, Peer},
     types::Download,
 };
-use crate::{debug, error, info, trace, warn};
 use std::sync::Arc;
 use std::sync::RwLock;
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -124,48 +125,39 @@ impl ConnectedWorker {
                                 allowed,
                                 own_username,
                             );
-                            let filename: Option<&str> = download.filename.split('\\').next_back();
-                            match filename {
-                                Some(filename) => {
-                                    match download_peer.download_file(
-                                        context.clone(),
-                                        Some(download.clone()),
-                                        None,
-                                    ) {
-                                        Ok((download, filename)) => {
-                                            let _ = download.sender.send(DownloadStatus::Completed);
-                                            context
-                                                .write()
-                                                .unwrap_or_else(|e| e.into_inner())
-                                                .update_download_with_status(
-                                                    download.token,
-                                                    DownloadStatus::Completed,
-                                                );
-                                            info!(
-                                                "Successfully downloaded {} bytes to {}",
-                                                download.size, filename
-                                            );
-                                        }
-                                        Err(e) => {
-                                            let _ = download.sender.send(DownloadStatus::Failed);
-                                            context
-                                                .write()
-                                                .unwrap_or_else(|e| e.into_inner())
-                                                .update_download_with_status(
-                                                    download.token,
-                                                    DownloadStatus::Failed,
-                                                );
-                                            error!(
-                                                "Failed to download file '{}' from {}:{} (token: {}) - Error: {}",
-                                                filename, peer.host, peer.port, download.token, e
-                                            );
-                                        }
-                                    }
+                            match download_peer.download_file(
+                                context.clone(),
+                                Some(download.clone()),
+                                None,
+                            ) {
+                                Ok((download, path)) => {
+                                    let _ = download.sender.send(DownloadStatus::Completed);
+                                    context
+                                        .write()
+                                        .unwrap_or_else(|e| e.into_inner())
+                                        .update_download_with_status(
+                                            download.token,
+                                            DownloadStatus::Completed,
+                                        );
+                                    info!(
+                                        "Successfully downloaded {} bytes to {}",
+                                        download.size, path
+                                    );
                                 }
-                                None => error!(
-                                    "Cant find filename to save download: {:?}",
-                                    download.filename
-                                ),
+                                Err(e) => {
+                                    let _ = download.sender.send(DownloadStatus::Failed);
+                                    context
+                                        .write()
+                                        .unwrap_or_else(|e| e.into_inner())
+                                        .update_download_with_status(
+                                            download.token,
+                                            DownloadStatus::Failed,
+                                        );
+                                    error!(
+                                        "Failed to download '{}' from {}:{} (token: {}): {}",
+                                        download.filename, peer.host, peer.port, download.token, e
+                                    );
+                                }
                             }
 
                             // Signal download slot freed (for concurrency limiter)
@@ -309,7 +301,7 @@ impl ConnectedWorker {
     fn process_failed_uploads(
         context: Arc<RwLock<ClientContext>>,
         username: &str,
-        filename: Option<&str>,
+        filename: Option<&SoulseekPath>,
     ) {
         let failed_tokens: Vec<_> = {
             let ctx = context.read().unwrap_or_else(|e| e.into_inner());
@@ -381,7 +373,10 @@ impl ConnectedWorker {
                             context
                                 .write()
                                 .unwrap_or_else(|e| e.into_inner())
-                                .update_download_with_status(download.token, DownloadStatus::Completed);
+                                .update_download_with_status(
+                                    download.token,
+                                    DownloadStatus::Completed,
+                                );
                         }
                         Err(e) => {
                             trace!("[worker] failed to download: {}", e);

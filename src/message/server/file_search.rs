@@ -2,8 +2,7 @@ use crate::{debug, info};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{
-    actor::server_actor::ServerMessage, message::Message,
-    message::handlers::MessageHandler,
+    actor::server_actor::ServerMessage, message::Message, message::handlers::MessageHandler,
 };
 
 pub struct FileSearchHandler;

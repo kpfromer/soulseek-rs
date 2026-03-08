@@ -110,11 +110,7 @@ impl ActorSystem {
 
     /// Spawn a new actor with initialization callback and return its handle
     /// The callback receives the actor handle before on_start is called
-    pub fn spawn_with_handle<A: Actor, F>(
-        &self,
-        mut actor: A,
-        init: F,
-    ) -> ActorHandle<A::Message>
+    pub fn spawn_with_handle<A: Actor, F>(&self, mut actor: A, init: F) -> ActorHandle<A::Message>
     where
         F: FnOnce(&mut A, ActorHandle<A::Message>) + Send + 'static,
     {

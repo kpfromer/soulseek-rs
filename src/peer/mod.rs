@@ -20,10 +20,7 @@ pub struct NewPeer {
     pub tcp_stream: TcpStream,
 }
 impl NewPeer {
-    pub fn new_from_message(
-        message: &mut Message,
-        tcp_stream: TcpStream,
-    ) -> Self {
+    pub fn new_from_message(message: &mut Message, tcp_stream: TcpStream) -> Self {
         let username = message.read_string();
         let connection_type = message.read_string().parse().unwrap();
         let token = message.read_int32();
@@ -154,8 +151,8 @@ impl Peer {
 #[test]
 fn test_new_from_message() {
     let data: Vec<u8> = [
-        36, 0, 0, 0, 18, 0, 0, 0, 2, 0, 0, 0, 100, 112, 1, 0, 0, 0, 80, 27,
-        231, 37, 45, 186, 8, 0, 0, 178, 78, 25, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        36, 0, 0, 0, 18, 0, 0, 0, 2, 0, 0, 0, 100, 112, 1, 0, 0, 0, 80, 27, 231, 37, 45, 186, 8, 0,
+        0, 178, 78, 25, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
     ]
     .to_vec();
     let mut message = Message::new_with_data(data);
@@ -176,9 +173,8 @@ fn test_new_from_message() {
 #[test]
 fn test_new_from_message2() {
     let data: Vec<u8> = [
-        42, 0, 0, 0, 18, 0, 0, 0, 8, 0, 0, 0, 103, 114, 97, 110, 100, 112, 97,
-        103, 1, 0, 0, 0, 80, 137, 128, 193, 68, 187, 8, 0, 0, 58, 16, 0, 0, 0,
-        1, 0, 0, 0, 188, 8, 0, 0,
+        42, 0, 0, 0, 18, 0, 0, 0, 8, 0, 0, 0, 103, 114, 97, 110, 100, 112, 97, 103, 1, 0, 0, 0, 80,
+        137, 128, 193, 68, 187, 8, 0, 0, 58, 16, 0, 0, 0, 1, 0, 0, 0, 188, 8, 0, 0,
     ]
     .to_vec();
     let mut message = Message::new_with_data(data);

@@ -2,11 +2,12 @@ use crate::actor::{Actor, ActorHandle, ConnectionState};
 use crate::client::ClientOperation;
 use crate::dispatcher::MessageDispatcher;
 use crate::message::peer::{
-    FileSearchResponse, GetShareFileList, PeerInit, PlaceInQueueResponse,
-    TransferRequest, TransferResponse, UploadFailedHandler,
+    FileSearchResponse, GetShareFileList, PeerInit, PlaceInQueueResponse, TransferRequest,
+    TransferResponse, UploadFailedHandler,
 };
 use crate::message::server::MessageFactory;
 use crate::message::{Handlers, Message, MessageReader, MessageType};
+use crate::path::SoulseekPath;
 use crate::peer::Peer;
 use crate::types::{Download, SearchResult, Transfer};
 use crate::{debug, error, trace, warn};
@@ -23,18 +24,18 @@ pub enum PeerMessage {
     SendMessage(Message),
     FileSearchResult(SearchResult),
     TransferRequest(Transfer),
-    UploadFailed(String, String),
+    UploadFailed(String, SoulseekPath),
     TransferResponse {
         token: u32,
         allowed: bool,
         reason: Option<String>,
     },
     PlaceInQueueResponse {
-        filename: String,
+        filename: SoulseekPath,
         place: u32,
     },
     SetUsername(String),
-    QueueUpload(String),
+    QueueUpload(SoulseekPath),
     RequestTransfer(Download),
     ProcessRead,
     ConnectionEstablished(TcpStream),
@@ -91,8 +92,7 @@ impl PeerActor {
     }
 
     fn initialize_dispatcher(&mut self) {
-        let (dispatcher_sender, dispatcher_receiver) =
-            mpsc::unbounded_channel::<PeerMessage>();
+        let (dispatcher_sender, dispatcher_receiver) = mpsc::unbounded_channel::<PeerMessage>();
 
         self.dispatcher_receiver = Some(dispatcher_receiver);
 
@@ -113,16 +113,16 @@ impl PeerActor {
     }
 
     fn process_dispatcher_messages(&mut self) {
-        let messages: Vec<PeerMessage> = self
-            .dispatcher_receiver
-            .as_mut()
-            .map_or_else(Vec::new, |receiver| {
-                let mut msgs = Vec::new();
-                while let Ok(msg) = receiver.try_recv() {
-                    msgs.push(msg);
-                }
-                msgs
-            });
+        let messages: Vec<PeerMessage> =
+            self.dispatcher_receiver
+                .as_mut()
+                .map_or_else(Vec::new, |receiver| {
+                    let mut msgs = Vec::new();
+                    while let Ok(msg) = receiver.try_recv() {
+                        msgs.push(msg);
+                    }
+                    msgs
+                });
 
         for msg in messages {
             self.handle_message(msg);
@@ -154,10 +154,7 @@ impl PeerActor {
             }
             PeerMessage::TransferRequest(transfer) => {
                 let username = self.peer.read().unwrap().username.clone();
-                debug!(
-                    "[peer:{}] TransferRequest for {}",
-                    username, transfer.token
-                );
+                debug!("[peer:{}] TransferRequest for {}", username, transfer.token);
 
                 self.client_channel
                     .send(ClientOperation::UpdateDownloadTokens(
@@ -166,12 +163,10 @@ impl PeerActor {
                     ))
                     .unwrap();
 
-                let transfer_response =
-                    MessageFactory::build_transfer_response_message(transfer);
+                let transfer_response = MessageFactory::build_transfer_response_message(transfer);
 
                 if let Some(ref handle) = self.self_handle
-                    && let Err(e) =
-                        handle.send(PeerMessage::SendMessage(transfer_response))
+                    && let Err(e) = handle.send(PeerMessage::SendMessage(transfer_response))
                 {
                     error!(
                         "[peer:{}] Failed to send TransferResponse message: {}",
@@ -227,13 +222,12 @@ impl PeerActor {
                 self.peer.write().unwrap().username = username;
             }
             PeerMessage::QueueUpload(filename) => {
-                let message =
-                    MessageFactory::build_queue_upload_message(&filename);
+                let message = MessageFactory::build_queue_upload_message(filename.as_str());
                 self.send_message(message);
             }
             PeerMessage::RequestTransfer(download) => {
                 let message = MessageFactory::build_transfer_request_message(
-                    &download.filename,
+                    download.filename.as_str(),
                     download.token,
                 );
                 self.send_message(message);
@@ -313,10 +307,7 @@ impl PeerActor {
                         username,
                         extracted_count,
                         message
-                            .get_message_name(
-                                MessageType::Peer,
-                                message.get_message_code() as u32
-                            )
+                            .get_message_name(MessageType::Peer, message.get_message_code() as u32)
                             .map_err(|e| e.to_string())
                     );
                     if let Some(ref dispatcher) = self.dispatcher {
@@ -358,9 +349,7 @@ impl PeerActor {
             message
                 .get_message_name(
                     MessageType::Peer,
-                    u32::from_le_bytes(
-                        message.get_slice(0, 4).try_into().unwrap()
-                    )
+                    u32::from_le_bytes(message.get_slice(0, 4).try_into().unwrap())
                 )
                 .map_err(|e| e.to_string())
         );
@@ -377,10 +366,7 @@ impl PeerActor {
                 );
             }
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                warn!(
-                    "[peer:{}] Write would block, message may be lost",
-                    username
-                );
+                warn!("[peer:{}] Write would block, message may be lost", username);
             }
             Err(e) => {
                 error!(
@@ -398,9 +384,10 @@ impl PeerActor {
 
         self.stream.take();
 
-        if let Err(e) = self.client_channel.send(
-            ClientOperation::PeerDisconnected(username, Some(error.into())),
-        ) {
+        if let Err(e) = self.client_channel.send(ClientOperation::PeerDisconnected(
+            username,
+            Some(error.into()),
+        )) {
             error!("Failed to send disconnect notification: {}", e);
         }
     }
@@ -425,8 +412,7 @@ impl PeerActor {
         let port = peer.port;
         drop(peer);
 
-        let socket_addr =
-            format!("{}:{}", host, port).parse::<std::net::SocketAddr>();
+        let socket_addr = format!("{}:{}", host, port).parse::<std::net::SocketAddr>();
 
         match socket_addr {
             Ok(addr) => {
@@ -438,32 +424,22 @@ impl PeerActor {
                 let handle = self.self_handle.clone();
                 tokio::spawn(async move {
                     let timeout = Duration::from_secs(5);
-                    let result = tokio::time::timeout(
-                        timeout,
-                        TcpStream::connect(addr),
-                    )
-                    .await;
+                    let result = tokio::time::timeout(timeout, TcpStream::connect(addr)).await;
 
                     if let Some(ref handle) = handle {
                         match result {
                             Ok(Ok(stream)) => {
                                 stream.set_nodelay(true).ok();
-                                let _ = handle.send(
-                                    PeerMessage::ConnectionEstablished(stream),
-                                );
+                                let _ = handle.send(PeerMessage::ConnectionEstablished(stream));
                             }
                             Ok(Err(e)) => {
-                                let _ = handle
-                                    .send(PeerMessage::ConnectionFailed(e));
+                                let _ = handle.send(PeerMessage::ConnectionFailed(e));
                             }
                             Err(_) => {
-                                let _ =
-                                    handle.send(PeerMessage::ConnectionFailed(
-                                        io::Error::new(
-                                            io::ErrorKind::TimedOut,
-                                            "connection timed out",
-                                        ),
-                                    ));
+                                let _ = handle.send(PeerMessage::ConnectionFailed(io::Error::new(
+                                    io::ErrorKind::TimedOut,
+                                    "connection timed out",
+                                )));
                             }
                         }
                     }
@@ -475,18 +451,14 @@ impl PeerActor {
                     "[peer:{}] Invalid socket address {}:{} - {}",
                     username, host, port, e
                 );
-                self.disconnect_with_error(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    e,
-                ));
+                self.disconnect_with_error(io::Error::new(io::ErrorKind::InvalidInput, e));
                 false
             }
         }
     }
 
     fn check_connection_status(&mut self) {
-        let ConnectionState::Connecting { since } = self.connection_state
-        else {
+        let ConnectionState::Connecting { since } = self.connection_state else {
             return;
         };
 
@@ -514,8 +486,7 @@ impl PeerActor {
         // For outbound connections (ConnectToPeer), send PierceFireWall
         // so the remote peer can match this connection to the original request.
         if self.needs_handshake {
-            let handshake_msg =
-                MessageFactory::build_pierce_firewall_message(token);
+            let handshake_msg = MessageFactory::build_pierce_firewall_message(token);
             match stream.try_write(&handshake_msg.get_buffer()) {
                 Ok(_) => {
                     debug!(

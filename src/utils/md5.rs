@@ -54,9 +54,8 @@ fn i(x: u32, y: u32, z: u32) -> u32 {
 
 // utility function to convert a vector of type T with size N into an array of type T with size N.
 fn vec_to_array<T, const N: usize>(v: Vec<T>) -> [T; N] {
-    v.try_into().unwrap_or_else(|_v: Vec<T>| {
-        panic!("error converting vector to array - sizes don't match")
-    })
+    v.try_into()
+        .unwrap_or_else(|_v: Vec<T>| panic!("error converting vector to array - sizes don't match"))
 }
 
 /**
@@ -298,16 +297,14 @@ fn compute_md5_digest(mut v: Vec<u8>) -> String {
         let word_dd = word_d;
 
         // execute round 1
-        let result =
-            round_one_operations(word_a, word_b, word_c, word_d, &table, &x);
+        let result = round_one_operations(word_a, word_b, word_c, word_d, &table, &x);
         word_a = result[0];
         word_b = result[1];
         word_c = result[2];
         word_d = result[3];
 
         // execute round 2
-        let result =
-            round_two_operations(word_a, word_b, word_c, word_d, &table, &x);
+        let result = round_two_operations(word_a, word_b, word_c, word_d, &table, &x);
 
         word_a = result[0];
         word_b = result[1];
@@ -315,16 +312,14 @@ fn compute_md5_digest(mut v: Vec<u8>) -> String {
         word_d = result[3];
 
         // execute round 3
-        let result =
-            round_three_operations(word_a, word_b, word_c, word_d, &table, &x);
+        let result = round_three_operations(word_a, word_b, word_c, word_d, &table, &x);
         word_a = result[0];
         word_b = result[1];
         word_c = result[2];
         word_d = result[3];
 
         // execute round 4
-        let result =
-            round_four_operations(word_a, word_b, word_c, word_d, &table, &x);
+        let result = round_four_operations(word_a, word_b, word_c, word_d, &table, &x);
         word_a = result[0];
         word_b = result[1];
         word_c = result[2];
@@ -459,15 +454,15 @@ fn lowercase_alphabet_correct_hash() {
 
 #[test]
 fn all_alphanumeric_correct_hash() {
-    let alpha_num_str =
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    let alpha_num_str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 
     assert_eq!("d174ab98d277d9f5a5611c2c9f419d9f", md5(alpha_num_str));
 }
 
 #[test]
 fn repeated_numbers_correct_hash() {
-    let repeated_number_str = "12345678901234567890123456789012345678901234567890123456789012345678901234567890";
+    let repeated_number_str =
+        "12345678901234567890123456789012345678901234567890123456789012345678901234567890";
 
     assert_eq!("57edf4a22be3c955ac49da2e2107b67a", md5(repeated_number_str));
 }

@@ -3,6 +3,7 @@ use crate::actor::{ActorHandle, ActorSystem};
 use crate::client::ClientOperation;
 use crate::debug;
 use crate::message::MessageReader;
+use crate::path::SoulseekPath;
 use crate::peer::Peer;
 
 use std::collections::HashMap;
@@ -48,10 +49,9 @@ impl PeerRegistry {
             self.own_username.clone(),
         );
 
-        let handle =
-            self.actor_system.spawn_with_handle(actor, |actor, handle| {
-                actor.set_self_handle(handle);
-            });
+        let handle = self.actor_system.spawn_with_handle(actor, |actor, handle| {
+            actor.set_self_handle(handle);
+        });
 
         let mut peers = self.peers.lock().unwrap();
         peers.insert(username.clone(), handle.clone());
@@ -64,10 +64,7 @@ impl PeerRegistry {
         peers.get(username).cloned()
     }
 
-    pub fn remove_peer(
-        &self,
-        username: &str,
-    ) -> Option<ActorHandle<PeerMessage>> {
+    pub fn remove_peer(&self, username: &str) -> Option<ActorHandle<PeerMessage>> {
         let mut peers = self.peers.lock().unwrap();
         let handle = peers.remove(username);
 
@@ -93,23 +90,15 @@ impl PeerRegistry {
         peers.contains_key(username)
     }
 
-    pub fn send_to_peer(
-        &self,
-        username: &str,
-        message: PeerMessage,
-    ) -> Result<(), String> {
-        let handle = self.get_peer(username).ok_or_else(|| {
-            format!("Peer {} not found in registry", username)
-        })?;
+    pub fn send_to_peer(&self, username: &str, message: PeerMessage) -> Result<(), String> {
+        let handle = self
+            .get_peer(username)
+            .ok_or_else(|| format!("Peer {} not found in registry", username))?;
 
         handle.send(message)
     }
 
-    pub fn queue_upload(
-        &self,
-        username: &str,
-        filename: String,
-    ) -> Result<(), String> {
+    pub fn queue_upload(&self, username: &str, filename: SoulseekPath) -> Result<(), String> {
         self.send_to_peer(username, PeerMessage::QueueUpload(filename))
     }
 }

@@ -1,5 +1,6 @@
 use crate::{
     message::{Message, MessageHandler},
+    path::SoulseekPath,
     peer::PeerMessage,
 };
 use tokio::sync::mpsc::UnboundedSender;
@@ -12,7 +13,7 @@ impl MessageHandler<PeerMessage> for PlaceInQueueResponse {
     }
 
     fn handle(&self, message: &mut Message, sender: UnboundedSender<PeerMessage>) {
-        let filename = message.read_string();
+        let filename = SoulseekPath::from_wire(message.read_string());
         let place = message.read_int32();
 
         sender
