@@ -53,28 +53,6 @@ impl std::fmt::Display for PeerAddress {
     }
 }
 
-#[derive(Debug)]
-pub struct Context {
-    pub logged_in: Option<bool>,
-    #[allow(dead_code)]
-    rooms: Rooms,
-}
-
-impl Default for Context {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Context {
-    pub fn new() -> Self {
-        Self {
-            #[allow(dead_code)]
-            rooms: Rooms::new(),
-            logged_in: Option::None,
-        }
-    }
-}
 #[derive(Debug, Clone)]
 pub struct UserMessage {
     id: u32,
@@ -111,71 +89,6 @@ impl UserMessage {
     }
 }
 
-#[allow(dead_code)]
-#[derive(Debug)]
-pub struct Rooms {
-    pub public_rooms: Vec<Room>,
-    pub owned_private_rooms: Vec<Room>,
-    pub private_rooms: Vec<Room>,
-    pub operated_private_rooms: Vec<Room>,
-}
-impl Rooms {
-    fn new() -> Self {
-        Self {
-            public_rooms: Vec::new(),
-            owned_private_rooms: Vec::new(),
-            private_rooms: Vec::new(),
-            operated_private_rooms: Vec::new(),
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn print(&self) {
-        info!("Public rooms ({}):", self.public_rooms.len());
-        for room in &self.public_rooms {
-            room.print();
-        }
-        info!("Owned private rooms ({}):", self.owned_private_rooms.len());
-        for room in &self.owned_private_rooms {
-            room.print();
-        }
-        info!("Private rooms ({}):", self.private_rooms.len());
-        for room in &self.private_rooms {
-            room.print();
-        }
-        info!(
-            "Operated private rooms ({}):",
-            self.operated_private_rooms.len()
-        );
-        for room in &self.operated_private_rooms {
-            room.print();
-        }
-    }
-}
-#[derive(Debug)]
-pub struct Room {
-    name: String,
-    number_of_users: i32,
-}
-impl Room {
-    #[allow(dead_code)]
-    pub fn new(name: String, number_of_users: i32) -> Self {
-        Self {
-            name,
-            number_of_users,
-        }
-    }
-    #[allow(dead_code)]
-    pub fn set_number_of_users(&mut self, number_of_users: i32) {
-        self.number_of_users = number_of_users;
-    }
-    pub fn print(&self) {
-        debug!(
-            "Room: {}, Number of users: {}",
-            self.name, self.number_of_users
-        );
-    }
-}
 
 #[derive(Debug)]
 pub enum ServerMessage {
