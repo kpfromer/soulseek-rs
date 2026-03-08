@@ -19,10 +19,14 @@ use tokio_util::sync::CancellationToken;
 /// State-transition events are forwarded to `state_monitor` via `event_tx`.
 pub struct ConnectedWorker {
     pub own_username: String,
+    /// Sender half — cloned into spawned closures so they can send back operations.
+    pub op_tx: UnboundedSender<ClientOperation>,
     pub op_rx: UnboundedReceiver<ClientOperation>,
     pub event_tx: UnboundedSender<WorkerEvent>,
     pub context: Arc<RwLock<ClientContext>>,
     pub cancellation_token: CancellationToken,
+    /// Sender to the ServerActor dispatcher. Populated by `SetServerSender` on first connect.
+    pub server_sender: Option<UnboundedSender<ServerMessage>>,
 }
 
 impl ConnectedWorker {
@@ -66,8 +70,9 @@ impl ConnectedWorker {
             ClientOperation::ConnectToPeer(peer) => {
                 let context = self.context.clone();
                 let own_username = self.own_username.clone();
+                let op_tx = self.op_tx.clone();
                 tokio::spawn(async move {
-                    Self::connect_to_peer(peer, context, own_username, None);
+                    Self::connect_to_peer(peer, context, own_username, None, op_tx);
                 });
             }
             ClientOperation::SearchResult(search_result) => {
@@ -99,7 +104,25 @@ impl ConnectedWorker {
                 }
             }
             ClientOperation::PierceFireWall(peer) => {
-                Self::pierce_firewall(peer, self.context.clone(), self.own_username.clone());
+                debug!("Piercing firewall for peer: {:?}", peer);
+                if let Some(ref ss) = self.server_sender {
+                    if let Some(token) = peer.token {
+                        if let Err(e) = ss.send(ServerMessage::PierceFirewall(token)) {
+                            error!("Failed to send PierceFirewall message: {}", e);
+                        }
+                    } else {
+                        error!("No token available for PierceFirewall");
+                    }
+                } else {
+                    error!("No server sender available for PierceFirewall");
+                }
+                Self::connect_to_peer(
+                    peer,
+                    self.context.clone(),
+                    self.own_username.clone(),
+                    None,
+                    self.op_tx.clone(),
+                );
             }
             ClientOperation::DownloadFromPeer(token, peer, allowed) => {
                 let maybe_download = {
@@ -108,6 +131,7 @@ impl ConnectedWorker {
                 };
                 let own_username = self.own_username.clone();
                 let context = self.context.clone();
+                let op_tx = self.op_tx.clone();
 
                 trace!(
                     "[worker] DownloadFromPeer token: {} peer: {:?}",
@@ -161,11 +185,7 @@ impl ConnectedWorker {
                             }
 
                             // Signal download slot freed (for concurrency limiter)
-                            if let Ok(ctx) = context.read() {
-                                if let Some(ref sender) = ctx.sender {
-                                    let _ = sender.send(ClientOperation::DownloadSlotFreed);
-                                }
-                            }
+                            let _ = op_tx.send(ClientOperation::DownloadSlotFreed);
                         });
                     }
                     None => {
@@ -185,15 +205,12 @@ impl ConnectedWorker {
 
                 if peer_exists {
                     debug!("Already connected to {}", new_peer.username);
-                } else {
-                    let ctx = self.context.read().unwrap_or_else(|e| e.into_inner());
-                    if let Some(ref server_sender) = ctx.server_sender {
-                        server_sender
-                            .send(ServerMessage::GetPeerAddress(new_peer.username.clone()))
-                            .unwrap_or_else(|e| {
-                                error!("[worker] Failed to send GetPeerAddress: {}", e)
-                            });
-                    }
+                } else if let Some(ref server_sender) = self.server_sender {
+                    server_sender
+                        .send(ServerMessage::GetPeerAddress(new_peer.username.clone()))
+                        .unwrap_or_else(|e| {
+                            error!("[worker] Failed to send GetPeerAddress: {}", e)
+                        });
                 }
 
                 let addr = new_peer.tcp_stream.peer_addr().unwrap();
@@ -216,6 +233,7 @@ impl ConnectedWorker {
                     self.context.clone(),
                     self.own_username.clone(),
                     Some(new_peer.tcp_stream),
+                    self.op_tx.clone(),
                 );
             }
             ClientOperation::GetPeerAddressResponse {
@@ -252,15 +270,16 @@ impl ConnectedWorker {
                     );
                     let context = self.context.clone();
                     let own_username = self.own_username.clone();
+                    let op_tx = self.op_tx.clone();
                     tokio::spawn(async move {
-                        Self::connect_to_peer(peer, context, own_username, None);
+                        Self::connect_to_peer(peer, context, own_username, None, op_tx);
                     });
                 }
             }
             ClientOperation::UpdateDownloadTokens(transfer, username) => {
                 let mut context = self.context.write().unwrap_or_else(|e| e.into_inner());
 
-                let download_to_update = context.get_downloads().iter().find_map(|d| {
+                let download_to_update = context.get_downloads().into_iter().find_map(|d| {
                     if d.username == username && d.filename == transfer.filename {
                         Some((d.token, d.clone()))
                     } else {
@@ -289,10 +308,7 @@ impl ConnectedWorker {
                 Self::process_failed_uploads(self.context.clone(), &username, Some(&filename));
             }
             ClientOperation::SetServerSender(sender) => {
-                self.context
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .server_sender = Some(sender);
+                self.server_sender = Some(sender);
                 debug!("[worker] Server sender initialized");
             }
         }
@@ -303,21 +319,17 @@ impl ConnectedWorker {
         username: &str,
         filename: Option<&SoulseekPath>,
     ) {
-        let failed_tokens: Vec<_> = {
-            let ctx = context.read().unwrap_or_else(|e| e.into_inner());
-            ctx.get_downloads()
-                .iter()
-                .filter(|d| d.username == username && filename.is_none_or(|f| d.filename == *f))
-                .map(|d| {
-                    let _ = d.sender.send(DownloadStatus::Failed);
-                    d.token
-                })
-                .collect()
-        };
-
+        let mut ctx = context.write().unwrap_or_else(|e| e.into_inner());
+        let failed_tokens: Vec<_> = ctx
+            .downloads
+            .values()
+            .filter(|d| d.username == username && filename.is_none_or(|f| d.filename == *f))
+            .map(|d| {
+                let _ = d.sender.send(DownloadStatus::Failed);
+                d.token
+            })
+            .collect();
         for token in failed_tokens {
-            let mut ctx = context.write().unwrap_or_else(|e| e.into_inner());
-            ctx.update_download_with_status(token, DownloadStatus::Failed);
             ctx.remove_download(token);
         }
     }
@@ -327,6 +339,7 @@ impl ConnectedWorker {
         context: Arc<RwLock<ClientContext>>,
         own_username: String,
         stream: Option<std::net::TcpStream>,
+        op_tx: UnboundedSender<ClientOperation>,
     ) {
         let peer_clone = peer.clone();
         trace!(
@@ -383,35 +396,12 @@ impl ConnectedWorker {
                         }
                     }
                     // Signal download slot freed
-                    if let Ok(ctx) = context.read() {
-                        if let Some(ref sender) = ctx.sender {
-                            let _ = sender.send(ClientOperation::DownloadSlotFreed);
-                        }
-                    }
+                    let _ = op_tx.send(ClientOperation::DownloadSlotFreed);
                 });
             }
             ConnectionType::D => {
                 error!("ConnectionType::D not implemented")
             }
         }
-    }
-
-    fn pierce_firewall(peer: Peer, context: Arc<RwLock<ClientContext>>, own_username: String) {
-        debug!("Piercing firewall for peer: {:?}", peer);
-        {
-            let ctx = context.read().unwrap_or_else(|e| e.into_inner());
-            if let Some(ref server_sender) = ctx.server_sender {
-                if let Some(token) = peer.token {
-                    if let Err(e) = server_sender.send(ServerMessage::PierceFirewall(token)) {
-                        error!("Failed to send PierceFirewall message: {}", e);
-                    }
-                } else {
-                    error!("No token available for PierceFirewall");
-                }
-            } else {
-                error!("No server sender available for PierceFirewall");
-            }
-        }
-        Self::connect_to_peer(peer, context, own_username, None);
     }
 }

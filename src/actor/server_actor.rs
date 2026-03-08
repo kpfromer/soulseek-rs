@@ -1,4 +1,4 @@
-use crate::actor::{Actor, ActorHandle, ConnectionState};
+use crate::actor::{Actor, ActorHandle};
 use crate::client::{ClientOperation, KeepAliveSettings, ReconnectSettings};
 use crate::dispatcher::MessageDispatcher;
 use crate::message::server::ConnectToPeerHandler;
@@ -113,18 +113,45 @@ pub enum ServerMessage {
     },
 }
 
+struct Dispatcher {
+    inner: MessageDispatcher<ServerMessage>,
+    receiver: UnboundedReceiver<ServerMessage>,
+    sender: UnboundedSender<ServerMessage>,
+}
+
+enum ServerConnection {
+    Disconnected {
+        #[allow(dead_code)]
+        since: Option<Instant>,
+    },
+    Connecting {
+        stream: TcpStream,
+        since: Instant,
+    },
+    Connected {
+        stream: TcpStream,
+        dispatcher: Dispatcher,
+    },
+}
+
+enum LoginState {
+    NotAttempted,
+    Pending {
+        response: tokio::sync::oneshot::Sender<Result<bool, SoulseekRs>>,
+        deadline: Instant,
+    },
+    LoggedIn,
+}
+
 pub struct ServerActor {
     address: PeerAddress,
     listen_port: u32,
     enable_listen: bool,
-    stream: Option<TcpStream>,
-    connection_state: ConnectionState,
+    connection: ServerConnection,
+    login_state: LoginState,
     reader: MessageReader,
     client_channel: UnboundedSender<ClientOperation>,
     self_handle: Option<ActorHandle<ServerMessage>>,
-    dispatcher: Option<MessageDispatcher<ServerMessage>>,
-    dispatcher_receiver: Option<UnboundedReceiver<ServerMessage>>,
-    dispatcher_sender: Option<UnboundedSender<ServerMessage>>,
     queued_messages: Vec<ServerMessage>,
     // Reconnect / keepalive state
     credentials: Option<(String, String)>,
@@ -132,9 +159,6 @@ pub struct ServerActor {
     reconnect_attempt: u32,
     last_disconnect: Option<Instant>,
     tcp_keepalive: KeepAliveSettings,
-    // Pending connect() caller waiting for login confirmation
-    pending_login: Option<tokio::sync::oneshot::Sender<Result<bool, SoulseekRs>>>,
-    login_deadline: Option<Instant>,
 }
 
 impl ServerActor {
@@ -150,11 +174,8 @@ impl ServerActor {
             address,
             listen_port,
             enable_listen,
-            stream: None,
-            connection_state: ConnectionState::Disconnected,
-            dispatcher: None,
-            dispatcher_receiver: None,
-            dispatcher_sender: None,
+            connection: ServerConnection::Disconnected { since: None },
+            login_state: LoginState::NotAttempted,
             reader: MessageReader::new(),
             client_channel,
             self_handle: None,
@@ -164,8 +185,6 @@ impl ServerActor {
             reconnect_attempt: 0,
             last_disconnect: None,
             tcp_keepalive,
-            pending_login: None,
-            login_deadline: None,
         }
     }
 
@@ -174,7 +193,10 @@ impl ServerActor {
     }
 
     pub fn get_sender(&self) -> Option<&UnboundedSender<ServerMessage>> {
-        self.dispatcher_sender.as_ref()
+        match &self.connection {
+            ServerConnection::Connected { dispatcher, .. } => Some(&dispatcher.sender),
+            _ => None,
+        }
     }
 
     fn initiate_connection(&mut self) -> bool {
@@ -221,8 +243,8 @@ impl ServerActor {
 
                         match TcpStream::from_std(std_stream) {
                             Ok(stream) => {
-                                self.stream = Some(stream);
-                                self.connection_state = ConnectionState::Connecting {
+                                self.connection = ServerConnection::Connecting {
+                                    stream,
                                     since: Instant::now(),
                                 };
                                 true
@@ -253,51 +275,17 @@ impl ServerActor {
         self.self_handle = Some(handle);
     }
 
-    fn initialize_dispatcher(&mut self) {
-        let (dispatcher_sender, dispatcher_receiver) = mpsc::unbounded_channel::<ServerMessage>();
-
-        self.dispatcher_receiver = Some(dispatcher_receiver);
-        self.dispatcher_sender = Some(dispatcher_sender.clone());
-
-        if let Err(e) = self
-            .client_channel
-            .send(ClientOperation::SetServerSender(dispatcher_sender.clone()))
-        {
-            error!("[server] Failed to send SetServerSender: {}", e);
-        }
-
-        let mut handlers = Handlers::new();
-
-        handlers.register_handler(LoginHandler);
-        handlers.register_handler(RoomListHandler);
-        handlers.register_handler(ExcludedSearchPhrasesHandler);
-        handlers.register_handler(PrivilegedUsersHandler);
-        handlers.register_handler(MessageUser);
-        handlers.register_handler(WishListIntervalHandler);
-        handlers.register_handler(ParentMinSpeedHandler);
-        handlers.register_handler(ParentSpeedRatioHandler);
-        handlers.register_handler(FileSearchHandler);
-        handlers.register_handler(GetPeerAddressHandler);
-        handlers.register_handler(ConnectToPeerHandler);
-
-        self.dispatcher = Some(MessageDispatcher::new(
-            "server".into(),
-            dispatcher_sender,
-            handlers,
-        ));
-    }
-
     fn process_dispatcher_messages(&mut self) {
         let messages: Vec<ServerMessage> =
-            self.dispatcher_receiver
-                .as_mut()
-                .map_or_else(Vec::new, |receiver| {
-                    let mut msgs = Vec::new();
-                    while let Ok(msg) = receiver.try_recv() {
-                        msgs.push(msg);
-                    }
-                    msgs
-                });
+            if let ServerConnection::Connected { dispatcher, .. } = &mut self.connection {
+                let mut msgs = Vec::new();
+                while let Ok(msg) = dispatcher.receiver.try_recv() {
+                    msgs.push(msg);
+                }
+                msgs
+            } else {
+                Vec::new()
+            };
 
         for msg in messages {
             self.handle_message(msg);
@@ -309,7 +297,7 @@ impl ServerActor {
     }
 
     fn handle_message(&mut self, msg: ServerMessage) {
-        if !matches!(self.connection_state, ConnectionState::Connected) {
+        if !matches!(self.connection, ServerConnection::Connected { .. }) {
             match &msg {
                 ServerMessage::ProcessRead => {
                     // Always process read operations
@@ -337,20 +325,23 @@ impl ServerActor {
             }
             ServerMessage::LoginStatus(logged_in) => {
                 // Resolve the pending connect() caller immediately — no polling needed.
-                if let Some(tx) = self.pending_login.take() {
-                    self.login_deadline = None;
+                if let LoginState::Pending { response, .. } =
+                    std::mem::replace(&mut self.login_state, LoginState::NotAttempted)
+                {
                     let result = if logged_in {
                         Ok(true)
                     } else {
                         Err(SoulseekRs::AuthenticationFailed)
                     };
-                    let _ = tx.send(result);
+                    let _ = response.send(result);
                 }
 
                 if logged_in {
                     // Reset reconnect state on successful login
                     self.reconnect_attempt = 0;
                     self.last_disconnect = None;
+
+                    self.login_state = LoginState::LoggedIn;
 
                     // Notify client that login succeeded (used for reconnect path)
                     if let Err(e) = self.client_channel.send(ClientOperation::LoginSucceeded) {
@@ -420,8 +411,10 @@ impl ServerActor {
 
                 // Park the caller's oneshot; resolved immediately when LoginStatus arrives
                 // or timed out via tick().
-                self.pending_login = Some(response);
-                self.login_deadline = Some(Instant::now() + Duration::from_secs(5));
+                self.login_state = LoginState::Pending {
+                    response,
+                    deadline: Instant::now() + Duration::from_secs(5),
+                };
             }
             ServerMessage::FileSearch { token, query } => {
                 self.file_search(token.0, &query);
@@ -435,9 +428,8 @@ impl ServerActor {
         }
 
         {
-            let stream = match self.stream.as_ref() {
-                Some(s) => s,
-                None => return,
+            let ServerConnection::Connected { ref stream, .. } = self.connection else {
+                return;
             };
 
             // Use try_read for non-blocking read on tokio TcpStream
@@ -484,10 +476,10 @@ impl ServerActor {
                             )
                             .map_err(|e| e.to_string())
                     );
-                    if let Some(ref dispatcher) = self.dispatcher {
-                        dispatcher.dispatch(&mut message);
+                    if let ServerConnection::Connected { dispatcher, .. } = &self.connection {
+                        dispatcher.inner.dispatch(&mut message);
                     } else {
-                        warn!("[server] No dispatcher available!",);
+                        warn!("[server] No dispatcher available!");
                     }
                 }
                 Err(e) => {
@@ -505,7 +497,8 @@ impl ServerActor {
     }
 
     fn queue_message(&mut self, message: Message) {
-        if let Some(sender) = &self.dispatcher_sender {
+        if let ServerConnection::Connected { dispatcher, .. } = &self.connection {
+            let sender = &dispatcher.sender;
             match sender.send(ServerMessage::SendMessage(message)) {
                 Ok(_) => {}
                 Err(e) => error!("Failed to send: {}", e),
@@ -517,12 +510,9 @@ impl ServerActor {
     }
 
     fn send_message(&mut self, message: Message) {
-        let stream = match self.stream.as_ref() {
-            Some(s) => s,
-            None => {
-                error!("[server] Cannot send message: stream is None");
-                return;
-            }
+        let ServerConnection::Connected { ref stream, .. } = self.connection else {
+            error!("[server] Cannot send message: not connected");
+            return;
         };
 
         trace!(
@@ -556,21 +546,22 @@ impl ServerActor {
     fn disconnect_with_error(&mut self, _error: io::Error) {
         debug!("[server] disconnect");
 
-        self.stream.take();
-
         // Only transition if we were previously connected or connecting
         if matches!(
-            self.connection_state,
-            ConnectionState::Connected | ConnectionState::Connecting { .. }
+            self.connection,
+            ServerConnection::Connected { .. } | ServerConnection::Connecting { .. }
         ) {
-            self.connection_state = ConnectionState::Disconnected;
+            self.connection = ServerConnection::Disconnected {
+                since: Some(Instant::now()),
+            };
             self.last_disconnect = Some(Instant::now());
             self.reconnect_attempt += 1;
 
             // Cancel any pending connect() caller waiting for login.
-            if let Some(tx) = self.pending_login.take() {
-                self.login_deadline = None;
-                let _ = tx.send(Err(SoulseekRs::ConnectionClosed));
+            if let LoginState::Pending { response, .. } =
+                std::mem::replace(&mut self.login_state, LoginState::NotAttempted)
+            {
+                let _ = response.send(Err(SoulseekRs::ConnectionClosed));
             }
 
             if let Err(e) = self
@@ -582,14 +573,8 @@ impl ServerActor {
         }
     }
 
-    fn disconnect(&mut self) {
-        debug!("[server] disconnected");
-
-        self.stream.take();
-    }
-
     fn check_connection_status(&mut self) {
-        let ConnectionState::Connecting { since } = self.connection_state else {
+        let ServerConnection::Connecting { since, .. } = self.connection else {
             return;
         };
 
@@ -602,14 +587,12 @@ impl ServerActor {
             return;
         }
 
-        if self.stream.is_none() {
-            return;
-        }
-
         // Since std::net::TcpStream::connect() is blocking and succeeded,
         // the connection is established once we have a stream.
         // Try a zero-byte read to verify the connection is still alive.
-        let stream = self.stream.as_ref().unwrap();
+        let ServerConnection::Connecting { ref stream, .. } = self.connection else {
+            return;
+        };
         let mut buf = [0u8; 1];
         match stream.try_read(&mut buf) {
             Ok(_) => {
@@ -617,12 +600,10 @@ impl ServerActor {
                 if buf[0] != 0 {
                     self.reader.push_bytes(&buf[..1]);
                 }
-                self.connection_state = ConnectionState::Connected;
                 self.on_connection_established();
             }
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                 // No data yet but socket is ready - connection established
-                self.connection_state = ConnectionState::Connected;
                 self.on_connection_established();
             }
             Err(e) => {
@@ -633,12 +614,47 @@ impl ServerActor {
     }
 
     fn on_connection_established(&mut self) {
-        if self.stream.is_none() {
-            error!("[server] on_connection_established called without a stream; ignoring");
-            return;
+        let stream = match std::mem::replace(
+            &mut self.connection,
+            ServerConnection::Disconnected { since: None },
+        ) {
+            ServerConnection::Connecting { stream, .. } => stream,
+            other => {
+                self.connection = other;
+                error!("[server] on_connection_established called in wrong state");
+                return;
+            }
         };
 
-        self.initialize_dispatcher();
+        let (dispatcher_sender, dispatcher_receiver) = mpsc::unbounded_channel::<ServerMessage>();
+
+        if let Err(e) = self
+            .client_channel
+            .send(ClientOperation::SetServerSender(dispatcher_sender.clone()))
+        {
+            error!("[server] Failed to send SetServerSender: {}", e);
+        }
+
+        let mut handlers = Handlers::new();
+        handlers.register_handler(LoginHandler);
+        handlers.register_handler(RoomListHandler);
+        handlers.register_handler(ExcludedSearchPhrasesHandler);
+        handlers.register_handler(PrivilegedUsersHandler);
+        handlers.register_handler(MessageUser);
+        handlers.register_handler(WishListIntervalHandler);
+        handlers.register_handler(ParentMinSpeedHandler);
+        handlers.register_handler(ParentSpeedRatioHandler);
+        handlers.register_handler(FileSearchHandler);
+        handlers.register_handler(GetPeerAddressHandler);
+        handlers.register_handler(ConnectToPeerHandler);
+
+        let dispatcher = Dispatcher {
+            inner: MessageDispatcher::new("server".into(), dispatcher_sender.clone(), handlers),
+            receiver: dispatcher_receiver,
+            sender: dispatcher_sender,
+        };
+
+        self.connection = ServerConnection::Connected { stream, dispatcher };
 
         // On reconnect (credentials already stored), auto-queue login
         if let Some((username, password)) = self.credentials.clone() {
@@ -713,40 +729,38 @@ impl Actor for ServerActor {
     }
 
     fn on_start(&mut self) {
-        if self.stream.is_none() {
+        if matches!(self.connection, ServerConnection::Disconnected { .. }) {
             self.initiate_connection();
         } else {
-            self.connection_state = ConnectionState::Connected;
             self.on_connection_established();
         }
     }
 
     fn on_stop(&mut self) {
         trace!("[server] actor stopping");
-        self.disconnect();
+        self.connection = ServerConnection::Disconnected { since: None };
     }
 
     fn tick(&mut self) {
         // Time out any pending login wait.
-        if let Some(deadline) = self.login_deadline {
-            if Instant::now() >= deadline {
-                self.login_deadline = None;
-                if let Some(tx) = self.pending_login.take() {
-                    let _ = tx.send(Err(SoulseekRs::Timeout));
+        if let LoginState::Pending { ref deadline, .. } = self.login_state {
+            if Instant::now() >= *deadline {
+                if let LoginState::Pending { response, .. } =
+                    std::mem::replace(&mut self.login_state, LoginState::NotAttempted)
+                {
+                    let _ = response.send(Err(SoulseekRs::Timeout));
                 }
             }
         }
 
-        match self.connection_state {
-            ConnectionState::Connecting { .. } => {
+        match &self.connection {
+            ServerConnection::Connecting { .. } => {
                 self.check_connection_status();
             }
-            ConnectionState::Connected => {
-                if self.stream.is_some() {
-                    self.process_read();
-                }
+            ServerConnection::Connected { .. } => {
+                self.process_read();
             }
-            ConnectionState::Disconnected => {
+            ServerConnection::Disconnected { .. } => {
                 self.maybe_reconnect();
             }
         }

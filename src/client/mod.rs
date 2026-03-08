@@ -130,7 +130,6 @@ impl Client {
         let context = Arc::new(RwLock::new(ClientContext::new()));
         {
             let mut ctx = context.write().unwrap_or_else(|e| e.into_inner());
-            ctx.sender = Some(op_tx.clone());
             let peer_registry =
                 PeerRegistry::new(ctx.actor_system.clone(), op_tx.clone(), username.clone());
             ctx.peer_registry = Some(peer_registry);
@@ -206,10 +205,12 @@ impl Client {
         // Spawn ConnectedWorker
         let worker = ConnectedWorker {
             own_username: username.clone(),
+            op_tx: op_tx.clone(),
             op_rx,
             event_tx,
             context: context.clone(),
             cancellation_token: cancellation_token.clone(),
+            server_sender: None,
         };
         tokio::spawn(async move { worker.run().await });
 
@@ -389,7 +390,6 @@ impl Client {
                 .read()
                 .unwrap_or_else(|e| e.into_inner())
                 .get_downloads()
-                .clone()
         } else {
             vec![]
         }
@@ -501,7 +501,6 @@ mod tests {
         use crate::token::DownloadToken;
         let mut context = ClientContext::new();
         let token = DownloadToken(123);
-        let new_token = DownloadToken(1234);
         let download = Download {
             username: "test".to_string(),
             filename: SoulseekPath::from("test.txt"),
@@ -512,18 +511,20 @@ mod tests {
             sender: mpsc::unbounded_channel().0,
         };
         context.add_download(download);
-        assert!(context.get_download_by_token(DownloadToken(123)).is_some());
-        assert_eq!(context.get_download_tokens(), vec![DownloadToken(123)]);
+        assert!(context.get_download_by_token(token).is_some());
+        assert_eq!(context.get_download_tokens(), vec![token]);
         assert_eq!(context.get_downloads().len(), 1);
         if let Some(download) = context.get_download_by_token_mut(token) {
             assert_eq!(download.token, token);
-            download.token = new_token
+            download.status = DownloadStatus::Failed;
         }
-        assert!(context.get_download_by_token(new_token).is_some());
-        assert_eq!(context.get_download_tokens(), vec![new_token]);
-        context.remove_download(new_token);
+        assert!(matches!(
+            context.get_download_by_token(token).unwrap().status,
+            DownloadStatus::Failed
+        ));
+        context.remove_download(token);
         assert_eq!(context.get_downloads().len(), 0);
-        assert!(context.get_download_by_token(DownloadToken(1234)).is_none());
+        assert!(context.get_download_by_token(token).is_none());
     }
 
     #[test]
