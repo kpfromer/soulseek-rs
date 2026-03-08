@@ -20,7 +20,6 @@ use crate::peer::Peer;
 
 use std::io;
 use std::net::ToSocketAddrs;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::net::TcpStream;
@@ -207,7 +206,6 @@ pub enum ServerMessage {
 
 pub struct ServerActor {
     address: PeerAddress,
-    context: Arc<std::sync::RwLock<Context>>,
     listen_port: u32,
     enable_listen: bool,
     stream: Option<TcpStream>,
@@ -225,6 +223,9 @@ pub struct ServerActor {
     reconnect_attempt: u32,
     last_disconnect: Option<Instant>,
     tcp_keepalive: KeepAliveSettings,
+    // Pending connect() caller waiting for login confirmation
+    pending_login: Option<tokio::sync::oneshot::Sender<Result<bool, SoulseekRs>>>,
+    login_deadline: Option<Instant>,
 }
 
 impl ServerActor {
@@ -238,7 +239,6 @@ impl ServerActor {
     ) -> Self {
         Self {
             address,
-            context: Arc::new(std::sync::RwLock::new(Context::new())),
             listen_port,
             enable_listen,
             stream: None,
@@ -255,6 +255,8 @@ impl ServerActor {
             reconnect_attempt: 0,
             last_disconnect: None,
             tcp_keepalive,
+            pending_login: None,
+            login_deadline: None,
         }
     }
 
@@ -435,10 +437,16 @@ impl ServerActor {
                 }
             }
             ServerMessage::LoginStatus(logged_in) => {
-                self.context
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .logged_in = Some(logged_in);
+                // Resolve the pending connect() caller immediately — no polling needed.
+                if let Some(tx) = self.pending_login.take() {
+                    self.login_deadline = None;
+                    let result = if logged_in {
+                        Ok(true)
+                    } else {
+                        Err(SoulseekRs::AuthenticationFailed)
+                    };
+                    let _ = tx.send(result);
+                }
 
                 if logged_in {
                     // Reset reconnect state on successful login
@@ -526,32 +534,10 @@ impl ServerActor {
                     &username, &password,
                 ));
 
-                let start = std::time::Instant::now();
-                let timeout = Duration::from_secs(5);
-
-                let context = self.context.clone();
-                tokio::spawn(async move {
-                    loop {
-                        if start.elapsed() >= timeout {
-                            let _ = response.send(Err(SoulseekRs::Timeout));
-                            break;
-                        }
-
-                        if let Some(logged_in) =
-                            context.read().unwrap_or_else(|e| e.into_inner()).logged_in
-                        {
-                            let result = if logged_in {
-                                Ok(true)
-                            } else {
-                                Err(SoulseekRs::AuthenticationFailed)
-                            };
-                            let _ = response.send(result);
-                            break;
-                        }
-
-                        tokio::time::sleep(Duration::from_millis(100)).await;
-                    }
-                });
+                // Park the caller's oneshot; resolved immediately when LoginStatus arrives
+                // or timed out via tick().
+                self.pending_login = Some(response);
+                self.login_deadline = Some(Instant::now() + Duration::from_secs(5));
             }
             ServerMessage::FileSearch { token, query } => {
                 self.file_search(token, &query);
@@ -702,11 +688,11 @@ impl ServerActor {
             self.last_disconnect = Some(Instant::now());
             self.reconnect_attempt += 1;
 
-            // Reset login state so the polling task doesn't see stale data
-            self.context
-                .write()
-                .unwrap_or_else(|e| e.into_inner())
-                .logged_in = None;
+            // Cancel any pending connect() caller waiting for login.
+            if let Some(tx) = self.pending_login.take() {
+                self.login_deadline = None;
+                let _ = tx.send(Err(SoulseekRs::ConnectionClosed));
+            }
 
             if let Err(e) = self.client_channel.send(ClientOperation::ServerDisconnected) {
                 error!("[server] Failed to send ServerDisconnected: {}", e);
@@ -860,6 +846,16 @@ impl Actor for ServerActor {
     }
 
     fn tick(&mut self) {
+        // Time out any pending login wait.
+        if let Some(deadline) = self.login_deadline {
+            if Instant::now() >= deadline {
+                self.login_deadline = None;
+                if let Some(tx) = self.pending_login.take() {
+                    let _ = tx.send(Err(SoulseekRs::Timeout));
+                }
+            }
+        }
+
         match self.connection_state {
             ConnectionState::Connecting { .. } => {
                 self.check_connection_status();
