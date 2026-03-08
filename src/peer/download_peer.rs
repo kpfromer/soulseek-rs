@@ -327,7 +327,7 @@ impl DownloadPeer {
                         let _ = dl.sender.send(status.clone());
                         client_context
                             .write()
-                            .unwrap()
+                            .unwrap_or_else(|e| e.into_inner())
                             .update_download_with_status(dl.token, status);
 
                         last_update_time = Instant::now();
@@ -427,7 +427,7 @@ impl DownloadPeer {
             let _ = dl.sender.send(DownloadStatus::Queued);
             client_context
                 .write()
-                .unwrap()
+                .unwrap_or_else(|e| e.into_inner())
                 .update_download_with_status(dl.token, DownloadStatus::Queued);
         }
 

@@ -36,7 +36,7 @@ pub use operation::ClientOperation;
 pub use settings::*;
 use state_monitor::{WorkerEvent, state_monitor};
 
-struct DownloadConcurrencyLimiter {
+pub(super) struct DownloadConcurrencyLimiter {
     max_concurrent: u32,
     active: u32,
     queue: VecDeque<PendingDownload>,

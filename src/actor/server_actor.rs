@@ -767,8 +767,9 @@ impl ServerActor {
     }
 
     fn on_connection_established(&mut self) {
-        let Some(_) = self.stream else {
-            panic!("Stream should be available here")
+        if self.stream.is_none() {
+            error!("[server] on_connection_established called without a stream; ignoring");
+            return;
         };
 
         self.initialize_dispatcher();

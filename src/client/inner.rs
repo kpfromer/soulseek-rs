@@ -41,5 +41,5 @@ pub struct ClientInner {
     /// Downloads queued while disconnected; replayed on LoginSucceeded.
     pub pending_downloads: VecDeque<PendingDownload>,
     pub search_limiter: Option<SlidingRateLimiter>,
-    pub download_limiter: Option<DownloadConcurrencyLimiter>,
+    pub(super) download_limiter: Option<DownloadConcurrencyLimiter>,
 }
