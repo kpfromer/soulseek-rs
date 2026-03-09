@@ -6,7 +6,6 @@ use tokio::sync::mpsc::UnboundedReceiver;
 pub enum WorkerEvent {
     ServerDisconnected,
     LoginSucceeded,
-    DownloadSlotFreed,
 }
 
 /// Tiny background task: the only place that mutates `ClientInner.state`.
@@ -21,9 +20,6 @@ pub async fn state_monitor(
             }
             WorkerEvent::LoginSucceeded => {
                 inner.lock().unwrap_or_else(|e| e.into_inner()).state = ClientState::Connected;
-            }
-            WorkerEvent::DownloadSlotFreed => {
-                // Download slot management is handled by ConnectedWorker; nothing to do here.
             }
         }
     }

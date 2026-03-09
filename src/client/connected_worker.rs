@@ -74,12 +74,26 @@ impl ConnectedWorker {
                     error!("[worker] Failed to forward LoginSucceeded: {}", e);
                 }
             }
-            ClientOperation::DownloadSlotFreed => {
+            ClientOperation::DownloadCompleted(token, result) => {
+                let status = match result {
+                    Ok(ref path) => {
+                        info!("Successfully downloaded to {}", path);
+                        DownloadStatus::Completed
+                    }
+                    Err(ref e) => {
+                        error!("Download failed: {}", e);
+                        DownloadStatus::Failed
+                    }
+                };
+                {
+                    let mut ctx = self.context.write().unwrap_or_else(|e| e.into_inner());
+                    if let Some(download) = ctx.get_download_by_token(token) {
+                        let _ = download.sender.send(status.clone());
+                    }
+                    ctx.update_download_with_status(token, status);
+                }
                 self.active_downloads = self.active_downloads.saturating_sub(1);
                 self.try_dequeue_next();
-                if let Err(e) = self.event_tx.send(WorkerEvent::DownloadSlotFreed) {
-                    error!("[worker] Failed to forward DownloadSlotFreed: {}", e);
-                }
             }
             ClientOperation::RequestDownload(pd) => {
                 if self.logged_in && self.max_concurrent.is_none_or(|max| self.active_downloads < max) {
@@ -151,7 +165,6 @@ impl ConnectedWorker {
                     ctx.get_download_by_token(token).cloned()
                 };
                 let own_username = self.own_username.clone();
-                let context = self.context.clone();
                 let op_tx = self.op_tx.clone();
 
                 trace!(
@@ -169,39 +182,17 @@ impl ConnectedWorker {
                                 token.0,
                                 own_username,
                             );
-                            match download_peer.download_direct(download.clone(), None) {
-                                Ok((download, path)) => {
-                                    let _ = download.sender.send(DownloadStatus::Completed);
-                                    context
-                                        .write()
-                                        .unwrap_or_else(|e| e.into_inner())
-                                        .update_download_with_status(
-                                            download.token,
-                                            DownloadStatus::Completed,
-                                        );
-                                    info!(
-                                        "Successfully downloaded {} bytes to {}",
-                                        download.size, path
-                                    );
-                                }
-                                Err(e) => {
-                                    let _ = download.sender.send(DownloadStatus::Failed);
-                                    context
-                                        .write()
-                                        .unwrap_or_else(|e| e.into_inner())
-                                        .update_download_with_status(
-                                            download.token,
-                                            DownloadStatus::Failed,
-                                        );
+                            let result = download_peer
+                                .download_direct(download.clone(), None)
+                                .map(|(_, path)| path)
+                                .map_err(|e| {
                                     error!(
                                         "Failed to download '{}' from {}:{} (token: {}): {}",
                                         download.filename, peer.host, peer.port, download.token, e
                                     );
-                                }
-                            }
-
-                            // Signal download slot freed (for concurrency limiter)
-                            let _ = op_tx.send(ClientOperation::DownloadSlotFreed);
+                                    crate::error::SoulseekRs::InvalidMessage(e.to_string())
+                                });
+                            let _ = op_tx.send(ClientOperation::DownloadCompleted(token, result));
                         });
                     }
                     None => {
@@ -439,24 +430,21 @@ impl ConnectedWorker {
                                 .cloned()
                         }
                     };
-                    match download_peer.download_pierced(resolve, stream) {
-                        Ok((download, filename)) => {
-                            trace!("[worker] downloaded {} bytes {:?}", filename, download.size);
-                            let _ = download.sender.send(DownloadStatus::Completed);
-                            context
-                                .write()
-                                .unwrap_or_else(|e| e.into_inner())
-                                .update_download_with_status(
-                                    download.token,
-                                    DownloadStatus::Completed,
-                                );
+                    let result = download_peer
+                        .download_pierced(resolve, stream)
+                        .map(|(download, path)| {
+                            trace!("[worker] downloaded {} bytes {:?}", path, download.size);
+                            (download.token, path)
+                        });
+                    match result {
+                        Ok((token, path)) => {
+                            let _ = op_tx.send(ClientOperation::DownloadCompleted(token, Ok(path)));
                         }
                         Err(e) => {
                             trace!("[worker] failed to download: {}", e);
+                            // No token available from pierce failure — slot freed without context update.
                         }
                     }
-                    // Signal download slot freed
-                    let _ = op_tx.send(ClientOperation::DownloadSlotFreed);
                 });
             }
             ConnectionType::D => {
