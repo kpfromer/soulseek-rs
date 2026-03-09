@@ -1,0 +1,8 @@
+[package]
+name = "song-rs"
+version = "0.1.0"
+edition = "2024"
+description = "High-level music search library built on soulseek-rs"
+
+[dependencies]
+soulseek-rs-lib = { path = "../soulseek-rs" }
