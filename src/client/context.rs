@@ -6,15 +6,15 @@ use crate::types::DownloadStatus;
 use crate::types::{Download, Search};
 
 pub struct ClientContext {
-    pub peer_registry: Option<PeerRegistry>,
+    pub peer_registry: PeerRegistry,
     pub searches: HashMap<String, Search>,
     pub downloads: HashMap<DownloadToken, Download>,
 }
 
 impl ClientContext {
-    pub fn new() -> Self {
+    pub fn new(peer_registry: PeerRegistry) -> Self {
         Self {
-            peer_registry: None,
+            peer_registry,
             searches: HashMap::new(),
             downloads: HashMap::new(),
         }

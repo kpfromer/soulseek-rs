@@ -115,9 +115,7 @@ impl Client {
         let context = {
             let peer_registry =
                 PeerRegistry::new(actor_system.clone(), op_tx.clone(), username.clone());
-            let mut ctx = ClientContext::new();
-            ctx.peer_registry = Some(peer_registry);
-            Arc::new(RwLock::new(ctx))
+            Arc::new(RwLock::new(ClientContext::new(peer_registry)))
         };
 
         // Drain any pre-connect pending downloads into the worker's queue.
@@ -214,9 +212,7 @@ impl Client {
         let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(ref active) = guard.active {
             let ctx = active.context.read().unwrap_or_else(|e| e.into_inner());
-            if let Some(ref registry) = ctx.peer_registry
-                && let Some(handle) = registry.remove_peer(username)
-            {
+            if let Some(handle) = ctx.peer_registry.remove_peer(username) {
                 let _ = handle.stop();
             }
         }
@@ -424,8 +420,12 @@ mod tests {
 
     #[test]
     fn test_client_context_downloads() {
+        use crate::actor::ActorSystem;
         use crate::token::DownloadToken;
-        let mut context = ClientContext::new();
+        let actor_system = Arc::new(ActorSystem::new());
+        let (op_tx, _) = mpsc::unbounded_channel();
+        let registry = PeerRegistry::new(actor_system, op_tx, "test".to_string());
+        let mut context = ClientContext::new(registry);
         let token = DownloadToken(123);
         let download = Download {
             username: "test".to_string(),

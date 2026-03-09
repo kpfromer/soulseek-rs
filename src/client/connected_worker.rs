@@ -124,9 +124,7 @@ impl ConnectedWorker {
             ClientOperation::PeerDisconnected(username, maybe_error) => {
                 {
                     let context = self.context.read().unwrap_or_else(|e| e.into_inner());
-                    if let Some(ref registry) = context.peer_registry
-                        && let Some(handle) = registry.remove_peer(&username)
-                    {
+                    if let Some(handle) = context.peer_registry.remove_peer(&username) {
                         let _ = handle.stop();
                     }
                 }
@@ -206,9 +204,7 @@ impl ConnectedWorker {
                     .read()
                     .unwrap_or_else(|e| e.into_inner())
                     .peer_registry
-                    .as_ref()
-                    .map(|r| r.contains(&new_peer.username))
-                    .unwrap_or(false);
+                    .contains(&new_peer.username);
 
                 if peer_exists {
                     debug!("Already connected to {}", new_peer.username);
@@ -260,9 +256,7 @@ impl ConnectedWorker {
                     .read()
                     .unwrap_or_else(|e| e.into_inner())
                     .peer_registry
-                    .as_ref()
-                    .map(|r| r.contains(&username))
-                    .unwrap_or(false);
+                    .contains(&username);
 
                 if !peer_exists {
                     let peer = Peer::new(
@@ -325,10 +319,8 @@ impl ConnectedWorker {
     fn try_initiate(&mut self, pd: PendingDownload) {
         let mut ctx = self.context.write().unwrap_or_else(|e| e.into_inner());
         ctx.add_download(pd.to_download());
-        if let Some(ref registry) = ctx.peer_registry {
-            let _ = registry.queue_upload(&pd.username, pd.filename.clone());
-            self.active_downloads += 1;
-        }
+        let _ = ctx.peer_registry.queue_upload(&pd.username, pd.filename.clone());
+        self.active_downloads += 1;
     }
 
     /// Drain pending queue up to the concurrency limit.
@@ -397,15 +389,11 @@ impl ConnectedWorker {
                     tokio::net::TcpStream::from_std(s).ok()
                 });
                 let ctx = context.read().unwrap_or_else(|e| e.into_inner());
-                if let Some(ref registry) = ctx.peer_registry {
-                    match registry.register_peer(peer_clone, tokio_stream, None) {
-                        Ok(_) => (),
-                        Err(e) => {
-                            trace!("Failed to spawn peer actor for {:?}: {:?}", username, e);
-                        }
+                match ctx.peer_registry.register_peer(peer_clone, tokio_stream, None) {
+                    Ok(_) => (),
+                    Err(e) => {
+                        trace!("Failed to spawn peer actor for {:?}: {:?}", username, e);
                     }
-                } else {
-                    trace!("PeerRegistry not initialized");
                 }
             }
             ConnectionType::F => {

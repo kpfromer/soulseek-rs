@@ -127,18 +127,14 @@ fn handle_peer_connection(
     _peer_port: u16,
 ) {
     let client_context = context.client_context.read().unwrap();
-    if let Some(ref registry) = client_context.peer_registry {
-        match registry.register_peer(peer.clone(), Some(stream), Some(reader)) {
-            Ok(_) => (),
-            Err(e) => {
-                error!(
-                    "Failed to spawn peer actor for {:?}: {:?}",
-                    peer.username, e
-                );
-            }
+    match client_context.peer_registry.register_peer(peer.clone(), Some(stream), Some(reader)) {
+        Ok(_) => (),
+        Err(e) => {
+            error!(
+                "Failed to spawn peer actor for {:?}: {:?}",
+                peer.username, e
+            );
         }
-    } else {
-        error!("PeerRegistry not initialized");
     }
 }
 
