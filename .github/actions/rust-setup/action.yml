@@ -1,0 +1,26 @@
+name: Rust setup
+description: Shared Rust CI setup (checkout, toolchain, cache, just)
+
+runs:
+  using: composite
+  steps:
+    - name: Install Rust stable
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        toolchain: stable
+
+    - name: Cache cargo
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/bin/
+          ~/.cargo/registry/index/
+          ~/.cargo/registry/cache/
+          ~/.cargo/git/db/
+          target/
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: ${{ runner.os }}-cargo-
+
+    - name: Install just
+      uses: extractions/setup-just@v3
+

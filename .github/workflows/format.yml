@@ -1,0 +1,21 @@
+name: Format
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Shared Rust setup
+        uses: ./.github/actions/rust-setup
+
+      - name: Check formatting
+        run: just check-format
+
