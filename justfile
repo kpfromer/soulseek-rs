@@ -4,18 +4,18 @@ default:
   just --list
 
 check:
-  cargo clippy --all-targets --all-features
+  cargo clippy --workspace --all-targets --all-features
 
 alias c := check
 
 format:
-  cargo fmt
+  cargo fmt --all
 
-test: 
-  cargo test --all-features
+test:
+  cargo test --workspace --all-features
 
-fix: 
-  cargo fix --all-features
+fix:
+  cargo fix --workspace --all-features
 
 run:
-  cargo run --example search_and_download --features=tracing --release
+  cargo run -p soulseek-rs-lib --example search_and_download --features=tracing --release
