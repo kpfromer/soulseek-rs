@@ -121,12 +121,14 @@ struct Dispatcher {
 
 enum ServerConnection {
     Disconnected {
-        #[allow(dead_code)]
-        since: Option<Instant>,
+        reconnect_attempt: u32,
+        last_disconnect: Option<Instant>,
     },
     Connecting {
         stream: TcpStream,
         since: Instant,
+        /// Preserved from `Disconnected` so `disconnect_with_error` can increment it.
+        reconnect_attempt: u32,
     },
     Connected {
         stream: TcpStream,
@@ -137,10 +139,14 @@ enum ServerConnection {
 enum LoginState {
     NotAttempted,
     Pending {
+        credentials: (String, String),
         response: tokio::sync::oneshot::Sender<Result<bool, SoulseekRs>>,
         deadline: Instant,
     },
-    LoggedIn,
+    /// Login succeeded (or login was in progress when TCP dropped); credentials available for reconnect.
+    LoggedIn {
+        credentials: (String, String),
+    },
 }
 
 pub struct ServerActor {
@@ -153,11 +159,7 @@ pub struct ServerActor {
     client_channel: UnboundedSender<ClientOperation>,
     self_handle: Option<ActorHandle<ServerMessage>>,
     queued_messages: Vec<ServerMessage>,
-    // Reconnect / keepalive state
-    credentials: Option<(String, String)>,
     reconnect_settings: ReconnectSettings,
-    reconnect_attempt: u32,
-    last_disconnect: Option<Instant>,
     tcp_keepalive: KeepAliveSettings,
 }
 
@@ -174,16 +176,13 @@ impl ServerActor {
             address,
             listen_port,
             enable_listen,
-            connection: ServerConnection::Disconnected { since: None },
+            connection: ServerConnection::Disconnected { reconnect_attempt: 0, last_disconnect: None },
             login_state: LoginState::NotAttempted,
             reader: MessageReader::new(),
             client_channel,
             self_handle: None,
             queued_messages: Vec::new(),
-            credentials: None,
             reconnect_settings,
-            reconnect_attempt: 0,
-            last_disconnect: None,
             tcp_keepalive,
         }
     }
@@ -196,6 +195,14 @@ impl ServerActor {
         match &self.connection {
             ServerConnection::Connected { dispatcher, .. } => Some(&dispatcher.sender),
             _ => None,
+        }
+    }
+
+    fn current_reconnect_attempt(&self) -> u32 {
+        match &self.connection {
+            ServerConnection::Disconnected { reconnect_attempt, .. } => *reconnect_attempt,
+            ServerConnection::Connecting { reconnect_attempt, .. } => *reconnect_attempt,
+            ServerConnection::Connected { .. } => 0,
         }
     }
 
@@ -243,9 +250,11 @@ impl ServerActor {
 
                         match TcpStream::from_std(std_stream) {
                             Ok(stream) => {
+                                let reconnect_attempt = self.current_reconnect_attempt();
                                 self.connection = ServerConnection::Connecting {
                                     stream,
                                     since: Instant::now(),
+                                    reconnect_attempt,
                                 };
                                 true
                             }
@@ -324,24 +333,26 @@ impl ServerActor {
                 }
             }
             ServerMessage::LoginStatus(logged_in) => {
-                // Resolve the pending connect() caller immediately — no polling needed.
-                if let LoginState::Pending { response, .. } =
-                    std::mem::replace(&mut self.login_state, LoginState::NotAttempted)
-                {
-                    let result = if logged_in {
-                        Ok(true)
-                    } else {
-                        Err(SoulseekRs::AuthenticationFailed)
-                    };
-                    let _ = response.send(result);
+                // Resolve the pending connect() caller and transition login state.
+                match std::mem::replace(&mut self.login_state, LoginState::NotAttempted) {
+                    LoginState::Pending { credentials, response, .. } => {
+                        if logged_in {
+                            let _ = response.send(Ok(true));
+                            self.login_state = LoginState::LoggedIn { credentials };
+                        } else {
+                            let _ = response.send(Err(SoulseekRs::AuthenticationFailed));
+                            // login_state stays NotAttempted — no reconnect
+                        }
+                    }
+                    other => {
+                        // Reconnect path: no response to send, credentials already in LoggedIn.
+                        self.login_state = other;
+                    }
                 }
 
                 if logged_in {
-                    // Reset reconnect state on successful login
-                    self.reconnect_attempt = 0;
-                    self.last_disconnect = None;
-
-                    self.login_state = LoginState::LoggedIn;
+                    // reconnect_attempt / last_disconnect are in ServerConnection::Disconnected,
+                    // which we've already left — no manual reset needed.
 
                     // Notify client that login succeeded (used for reconnect path)
                     if let Err(e) = self.client_channel.send(ClientOperation::LoginSucceeded) {
@@ -404,14 +415,11 @@ impl ServerActor {
                 password,
                 response,
             } => {
-                // Store credentials for reconnect
-                self.credentials = Some((username.clone(), password.clone()));
-
                 self.queue_message(MessageFactory::build_login_message(&username, &password));
 
-                // Park the caller's oneshot; resolved immediately when LoginStatus arrives
-                // or timed out via tick().
+                // Park the caller's oneshot; resolved when LoginStatus arrives or timed out.
                 self.login_state = LoginState::Pending {
+                    credentials: (username, password),
                     response,
                     deadline: Instant::now() + Duration::from_secs(5),
                 };
@@ -546,30 +554,30 @@ impl ServerActor {
     fn disconnect_with_error(&mut self, _error: io::Error) {
         debug!("[server] disconnect");
 
-        // Only transition if we were previously connected or connecting
-        if matches!(
-            self.connection,
-            ServerConnection::Connected { .. } | ServerConnection::Connecting { .. }
-        ) {
-            self.connection = ServerConnection::Disconnected {
-                since: Some(Instant::now()),
-            };
-            self.last_disconnect = Some(Instant::now());
-            self.reconnect_attempt += 1;
+        // Only transition if we were previously connected or connecting.
+        let new_reconnect_attempt = match &self.connection {
+            ServerConnection::Connected { .. } => 1,
+            ServerConnection::Connecting { reconnect_attempt, .. } => reconnect_attempt + 1,
+            ServerConnection::Disconnected { .. } => return,
+        };
+        self.connection = ServerConnection::Disconnected {
+            reconnect_attempt: new_reconnect_attempt,
+            last_disconnect: Some(Instant::now()),
+        };
 
-            // Cancel any pending connect() caller waiting for login.
-            if let LoginState::Pending { response, .. } =
-                std::mem::replace(&mut self.login_state, LoginState::NotAttempted)
-            {
-                let _ = response.send(Err(SoulseekRs::ConnectionClosed));
-            }
+        // Cancel any pending connect() caller, preserving credentials for reconnect.
+        if let LoginState::Pending { credentials, response, .. } =
+            std::mem::replace(&mut self.login_state, LoginState::NotAttempted)
+        {
+            let _ = response.send(Err(SoulseekRs::ConnectionClosed));
+            self.login_state = LoginState::LoggedIn { credentials };
+        }
 
-            if let Err(e) = self
-                .client_channel
-                .send(ClientOperation::ServerDisconnected)
-            {
-                error!("[server] Failed to send ServerDisconnected: {}", e);
-            }
+        if let Err(e) = self
+            .client_channel
+            .send(ClientOperation::ServerDisconnected)
+        {
+            error!("[server] Failed to send ServerDisconnected: {}", e);
         }
     }
 
@@ -616,7 +624,7 @@ impl ServerActor {
     fn on_connection_established(&mut self) {
         let stream = match std::mem::replace(
             &mut self.connection,
-            ServerConnection::Disconnected { since: None },
+            ServerConnection::Disconnected { reconnect_attempt: 0, last_disconnect: None },
         ) {
             ServerConnection::Connecting { stream, .. } => stream,
             other => {
@@ -656,8 +664,9 @@ impl ServerActor {
 
         self.connection = ServerConnection::Connected { stream, dispatcher };
 
-        // On reconnect (credentials already stored), auto-queue login
-        if let Some((username, password)) = self.credentials.clone() {
+        // On reconnect (previously logged in), auto-queue login with stored credentials.
+        if let LoginState::LoggedIn { credentials: (ref u, ref p) } = self.login_state {
+            let (username, password) = (u.clone(), p.clone());
             info!("[server] Reconnect: auto-queuing login for {}", username);
             self.queue_message(MessageFactory::build_login_message(&username, &password));
         }
@@ -675,12 +684,19 @@ impl ServerActor {
     }
 
     fn maybe_reconnect(&mut self) {
-        // Only reconnect if we have credentials (i.e., login was attempted at least once)
-        if self.credentials.is_none() {
+        // Only reconnect after a successful login (credentials stored in LoggedIn state).
+        if !matches!(self.login_state, LoginState::LoggedIn { .. }) {
             return;
         }
 
-        let Some(last_disconnect) = self.last_disconnect else {
+        let (reconnect_attempt, last_disconnect) = match &self.connection {
+            ServerConnection::Disconnected { reconnect_attempt, last_disconnect } => {
+                (*reconnect_attempt, *last_disconnect)
+            }
+            _ => return,
+        };
+
+        let Some(last_disconnect) = last_disconnect else {
             return;
         };
 
@@ -692,7 +708,7 @@ impl ServerActor {
                 max_attempts,
             } => {
                 if let Some(max) = max_attempts {
-                    if self.reconnect_attempt > *max {
+                    if reconnect_attempt > *max {
                         warn!(
                             "[server] Max reconnect attempts ({}) reached, giving up",
                             max
@@ -701,7 +717,7 @@ impl ServerActor {
                     }
                 }
                 // Exponential backoff: min_delay * 2^(attempt-1), capped at max_delay
-                let exp = self.reconnect_attempt.saturating_sub(1);
+                let exp = reconnect_attempt.saturating_sub(1);
                 let factor = 1u64.checked_shl(exp).unwrap_or(u64::MAX);
                 let delay_secs = (min_delay.as_secs()).saturating_mul(factor);
                 Duration::from_secs(delay_secs.min(max_delay.as_secs()))
@@ -714,7 +730,7 @@ impl ServerActor {
 
         info!(
             "[server] Attempting reconnect (attempt {}, backoff {}s)...",
-            self.reconnect_attempt,
+            reconnect_attempt,
             backoff.as_secs()
         );
         self.initiate_connection();
@@ -738,7 +754,7 @@ impl Actor for ServerActor {
 
     fn on_stop(&mut self) {
         trace!("[server] actor stopping");
-        self.connection = ServerConnection::Disconnected { since: None };
+        self.connection = ServerConnection::Disconnected { reconnect_attempt: 0, last_disconnect: None };
     }
 
     fn tick(&mut self) {
@@ -749,6 +765,7 @@ impl Actor for ServerActor {
                     std::mem::replace(&mut self.login_state, LoginState::NotAttempted)
                 {
                     let _ = response.send(Err(SoulseekRs::Timeout));
+                    // login_state stays NotAttempted — login protocol timed out, don't reconnect
                 }
             }
         }
