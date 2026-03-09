@@ -6,13 +6,9 @@ use tracing_subscriber::fmt;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let file_appender = rolling::never(".", "soulseek.log");
+    let file_appender = rolling::never("downloads", "soulseek.log");
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
-    fmt()
-        .with_writer(non_blocking)
-        .with_ansi(false)
-        .init();
-
+    fmt().with_writer(non_blocking).with_ansi(false).init();
 
     // Prompt for credentials
     print!("Username: ");

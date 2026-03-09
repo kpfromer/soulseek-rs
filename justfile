@@ -11,10 +11,11 @@ alias c := check
 format:
   cargo fmt
 
-# Run tests for backend
 test: 
-  cargo test
+  cargo test --all-features
 
-# Fix frontend biome issues
 fix: 
-  cargo fix
+  cargo fix --all-features
+
+run:
+  cargo run --example search_and_download --features=tracing --release
