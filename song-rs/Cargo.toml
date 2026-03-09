@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 description = "High-level music search library built on soulseek-rs"
 
+[[example]]
+name = "search_and_download"
+
 [dependencies]
 soulseek-rs-lib = { path = "../soulseek-rs" }
 thiserror = "2.0.18"

@@ -1,5 +1,3 @@
-//! song-rs: high-level music search and download on top of soulseek-rs.
-
 pub mod error;
 mod parser;
 mod ranker;
