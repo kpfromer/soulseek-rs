@@ -7,7 +7,7 @@ pub use error::Error;
 pub use types::{FileType, SongQuery, SongResult};
 
 use soulseek_rs::types::{Download, DownloadStatus};
-use std::time::Duration;
+use std::{path::Path, time::Duration};
 use tokio::sync::mpsc::UnboundedReceiver;
 
 pub struct Client {
@@ -80,8 +80,10 @@ impl Client {
         let (dl, rx) = self.download(&best, download_dir).await?;
         Ok((best, dl, rx))
     }
+}
 
-    pub fn shutdown(&self) {
+impl Drop for Client {
+    fn drop(&mut self) {
         self.inner.shutdown();
     }
 }

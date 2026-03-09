@@ -3,35 +3,130 @@
 //! Run with:
 //!   cargo run -p song-rs --example search_and_download
 
+use clap::Parser;
 use song_rs::{Client, SongQuery};
 use soulseek_rs::types::DownloadStatus;
 use std::io::{self, Write};
+use std::path::PathBuf;
 use std::time::Duration;
+
+#[derive(Parser)]
+struct Args {
+    #[arg(long, default_value = "./downloads")]
+    download_dir: PathBuf,
+
+    #[arg(long)]
+    username: Option<String>,
+
+    #[arg(long)]
+    password: Option<String>,
+
+    #[arg(long, default_value = "10")]
+    timeout: u64,
+
+    #[arg(long, default_value = "false")]
+    download_best: bool,
+
+    #[arg(long)]
+    title: Option<String>,
+
+    #[arg(long)]
+    artist: Option<String>,
+
+    #[arg(long)]
+    album: Option<String>,
+
+    #[arg(long)]
+    duration: Option<u32>,
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // --- Credentials ---
-    let username = prompt("Username: ")?;
-    let password = prompt("Password: ")?;
+    let args = Args::parse();
 
-    let mut client = Client::new(username.trim(), password.trim());
+    // --- Credentials ---
+    let username = args
+        .username
+        .map(Ok)
+        .unwrap_or_else(|| prompt("Username: "))?;
+    let password = args
+        .password
+        .map(Ok)
+        .unwrap_or_else(|| prompt("Password: "))?;
+
+    let mut client = Client::new(username, password);
 
     // --- Song query ---
-    let title = prompt("Song title: ")?;
-    let artist = prompt("Artist: ")?;
-    let duration_str = prompt("Duration in seconds (0 if unknown): ")?;
-    let duration_secs: u32 = duration_str.trim().parse().unwrap_or(0);
+    let title = args
+        .title
+        .map(Ok)
+        .unwrap_or_else(|| prompt("Song title: "))?;
+    let artist = args.artist.map(Ok).unwrap_or_else(|| prompt("Artist: "))?;
+    let album = args.album.map(Ok).unwrap_or_else(|| prompt("Album: "))?;
+    let duration_secs = args
+        .duration
+        .map(Ok::<_, Box<dyn std::error::Error>>)
+        .unwrap_or_else(|| {
+            let duration = prompt("Duration in seconds: ")?;
+            let duration: u32 = duration.trim().parse()?;
+            Ok(duration)
+        })?;
 
     let query = SongQuery {
-        title: title.trim().to_string(),
-        artist: artist.trim().to_string(),
-        album: None,
+        title,
+        artist,
+        album: Some(album),
         duration_secs,
     };
 
     // --- Search ---
-    println!("\nSearching for \"{} - {}\" (15s timeout)...", query.title, query.artist);
-    let results = client.search(&query, Duration::from_secs(15)).await?;
+    println!(
+        "\nSearching for \"{} - {}\" ({}s timeout)...",
+        query.title, query.artist, args.timeout
+    );
+    if args.download_best {
+        let (result, _dl, mut rx) = client
+            .download_best(
+                &query,
+                Duration::from_secs(args.timeout),
+                args.download_dir.to_string_lossy().to_string(),
+            )
+            .await?;
+
+        while let Some(status) = rx.recv().await {
+            match status {
+                DownloadStatus::Queued => println!("  Queued..."),
+                DownloadStatus::InProgress {
+                    bytes_downloaded,
+                    total_bytes,
+                    speed_bytes_per_sec,
+                } => {
+                    let pct = bytes_downloaded as f64 / total_bytes as f64 * 100.0;
+                    let speed_kb = speed_bytes_per_sec / 1024.0;
+                    print!("\r  {pct:5.1}%  ({speed_kb:.0} KB/s)   ");
+                    io::stdout().flush()?;
+                }
+                DownloadStatus::Completed => {
+                    println!("\n  Done! Saved to ./downloads/");
+                    break;
+                }
+                DownloadStatus::Failed => {
+                    eprintln!("\n  Download failed.");
+                    break;
+                }
+                DownloadStatus::TimedOut => {
+                    eprintln!("\n  Download timed out.");
+                    break;
+                }
+            }
+        }
+        println!("Downloaded \"{}\"...", result.filename.filename());
+        return Ok(());
+    }
+
+    let results = client
+        .search(&query, Duration::from_secs(args.timeout))
+        .await?;
 
     if results.is_empty() {
         println!("No results found.");
@@ -43,10 +138,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\nTop {} results (sorted by match score):\n", display);
     for (i, r) in results.iter().take(display).enumerate() {
         let size_mb = r.size as f64 / 1_048_576.0;
-        let dur = r
-            .duration
-            .map(|d| format!(", {}s", d))
-            .unwrap_or_default();
+        let dur = r.duration.map(|d| format!(", {}s", d)).unwrap_or_default();
         let br = r
             .bitrate
             .map(|b| format!(", {}kbps", b))
@@ -66,7 +158,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // --- Download ---
     println!("\nDownloading \"{}\"...", result.filename.filename());
-    let (_dl, mut rx) = client.download(result, "./downloads").await?;
+    let (_dl, mut rx) = client
+        .download(result, args.download_dir.to_string_lossy().to_string())
+        .await?;
 
     while let Some(status) = rx.recv().await {
         match status {
@@ -96,7 +190,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    client.shutdown();
     Ok(())
 }
 
@@ -105,5 +198,5 @@ fn prompt(msg: &str) -> io::Result<String> {
     io::stdout().flush()?;
     let mut s = String::new();
     io::stdin().read_line(&mut s)?;
-    Ok(s)
+    Ok(s.trim().to_string())
 }
