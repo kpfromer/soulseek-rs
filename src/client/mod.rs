@@ -2,7 +2,6 @@ use crate::actor::server_actor::{ServerActor, ServerMessage};
 use crate::path::SoulseekPath;
 use crate::search_rate_limiter::SlidingRateLimiter;
 use crate::types::DownloadStatus;
-use crate::utils::logger;
 use crate::{
     actor::peer_registry::PeerRegistry,
     error::{Result, SoulseekRs},
@@ -58,8 +57,6 @@ impl Client {
     }
 
     pub fn with_settings(settings: ClientSettings) -> Self {
-        logger::init();
-
         let search_limiter = settings
             .search_rate_limit_settings
             .as_ref()
