@@ -7,7 +7,7 @@ pub struct SongQuery {
     pub title: String,
     pub artist: String,
     pub album: Option<String>,
-    pub duration_secs: Option<u32>,
+    pub duration_secs: u32,
 }
 
 #[derive(Debug, Clone)]

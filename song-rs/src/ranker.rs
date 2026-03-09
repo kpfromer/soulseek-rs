@@ -13,12 +13,7 @@ pub(crate) fn rank_results(query: &SongQuery, files: &[File]) -> Vec<SongResult>
         .iter()
         .filter_map(|file| {
             // Parse file type from extension.
-            let ext = file
-                .name
-                .filename()
-                .rsplit('.')
-                .next()
-                .unwrap_or("");
+            let ext = file.name.filename().rsplit('.').next().unwrap_or("");
             let file_type = FileType::from_extension(ext);
 
             // Parse metadata from path.
@@ -46,7 +41,11 @@ pub(crate) fn rank_results(query: &SongQuery, files: &[File]) -> Vec<SongResult>
         })
         .collect();
 
-    results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     results
 }
 
@@ -68,9 +67,9 @@ fn compare_tracks(
         similarity(&norm_query_artist, &norm_parsed_artist)
     };
 
-    let duration_score = match (query.duration_secs, attrs.duration) {
-        (Some(q), Some(f)) => {
-            let diff = (q as i64 - f as i64).unsigned_abs() as u32;
+    let duration_score = match attrs.duration {
+        Some(f) => {
+            let diff = (query.duration_secs as i64 - f as i64).unsigned_abs() as u32;
             if diff <= 5 {
                 1.0
             } else if diff >= 30 {

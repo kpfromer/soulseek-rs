@@ -52,6 +52,7 @@ impl Client {
     pub async fn download(
         &mut self,
         result: &SongResult,
+        // TODO: use a path instead of a string
         download_dir: impl Into<String>,
     ) -> Result<(Download, UnboundedReceiver<DownloadStatus>), Error> {
         self.connect().await?;
@@ -60,6 +61,7 @@ impl Client {
             result.filename.clone(),
             result.username.clone(),
             result.size,
+            // TODO: use a path instead of a string
             download_dir.into(),
         )?;
         Ok((dl, rx))
@@ -70,6 +72,7 @@ impl Client {
         &mut self,
         query: &SongQuery,
         timeout: Duration,
+        // TODO: use a path instead of a string
         download_dir: impl Into<String>,
     ) -> Result<(SongResult, Download, UnboundedReceiver<DownloadStatus>), Error> {
         self.connect().await?;
