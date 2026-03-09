@@ -3,18 +3,26 @@ use unicode_normalization::UnicodeNormalization;
 use soulseek_rs::types::File;
 
 use crate::parser::parse_soulseek_filename;
-use crate::types::{FileType, SongQuery, SongResult};
+use crate::types::{FileType, SongQuery, SongResult, WantedFileTypes};
 
 const MIN_SCORE_THRESHOLD: f64 = 0.50;
 
 /// Convert a list of soulseek-rs Files into scored, filtered, sorted SongResults.
-pub(crate) fn rank_results(query: &SongQuery, files: &[File]) -> Vec<SongResult> {
+pub(crate) fn rank_results(
+    query: &SongQuery,
+    files: &[File],
+    wanted_file_types: &WantedFileTypes,
+) -> Vec<SongResult> {
     let mut results: Vec<SongResult> = files
         .iter()
         .filter_map(|file| {
             // Parse file type from extension.
             let ext = file.name.filename().rsplit('.').next().unwrap_or("");
             let file_type = FileType::from_extension(ext);
+
+            if !wanted_file_types.is_compatible(&file_type) {
+                return None;
+            }
 
             // Parse metadata from path.
             let parsed = parse_soulseek_filename(file.name.as_str());

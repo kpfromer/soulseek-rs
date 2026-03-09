@@ -5,7 +5,7 @@
 
 use clap::Parser;
 use clap::ValueEnum;
-use song_rs::{Client, SongQuery};
+use song_rs::{Client, SongQuery, WantedFileTypes};
 use soulseek_rs::types::DownloadStatus;
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -17,6 +17,15 @@ enum FileType {
     Lossless,
     Lossy,
     All,
+}
+impl From<FileType> for WantedFileTypes {
+    fn from(value: FileType) -> Self {
+        match value {
+            FileType::Lossless => WantedFileTypes::lossless(),
+            FileType::Lossy => WantedFileTypes::lossy(),
+            FileType::All => WantedFileTypes::all(),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -129,6 +138,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &query,
                 Duration::from_secs(args.timeout),
                 args.download_dir.to_string_lossy().to_string(),
+                &WantedFileTypes::from(args.file_type),
             )
             .await?;
 
@@ -164,7 +174,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let results = client
-        .search(&query, Duration::from_secs(args.timeout))
+        .search(
+            &query,
+            Duration::from_secs(args.timeout),
+            &WantedFileTypes::from(args.file_type),
+        )
         .await?;
 
     if results.is_empty() {

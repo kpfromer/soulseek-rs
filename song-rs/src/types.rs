@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{collections::HashSet, fmt};
 
 use soulseek_rs::SoulseekPath;
 
@@ -24,7 +24,7 @@ pub struct SongResult {
     pub score: f64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum FileType {
     Mp3,
     Flac,
@@ -72,6 +72,45 @@ impl fmt::Display for FileType {
             Self::Aiff => write!(f, "aiff"),
             Self::Opus => write!(f, "opus"),
             Self::Other(ext) => write!(f, "{}", ext),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WantedFileTypes {
+    All,
+    Specific(HashSet<FileType>),
+}
+
+impl WantedFileTypes {
+    pub fn lossless() -> Self {
+        Self::Specific(HashSet::from([
+            FileType::Flac,
+            FileType::Alac,
+            FileType::Wav,
+            FileType::Aiff,
+        ]))
+    }
+    pub fn lossy() -> Self {
+        Self::Specific(HashSet::from([
+            FileType::Mp3,
+            FileType::Aac,
+            FileType::M4a,
+            FileType::Ogg,
+            FileType::Opus,
+        ]))
+    }
+    pub fn all() -> Self {
+        Self::All
+    }
+    pub fn specific(file_types: HashSet<FileType>) -> Self {
+        Self::Specific(file_types)
+    }
+
+    pub(crate) fn is_compatible(&self, file_type: &FileType) -> bool {
+        match self {
+            Self::All => true,
+            Self::Specific(file_types) => file_types.contains(file_type),
         }
     }
 }

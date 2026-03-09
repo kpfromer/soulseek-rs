@@ -4,7 +4,7 @@ mod ranker;
 pub mod types;
 
 pub use error::Error;
-pub use types::{FileType, SongQuery, SongResult};
+pub use types::{FileType, SongQuery, SongResult, WantedFileTypes};
 
 use soulseek_rs::types::{Download, DownloadStatus};
 use std::time::Duration;
@@ -33,6 +33,7 @@ impl Client {
         &mut self,
         query: &SongQuery,
         timeout: Duration,
+        wanted_file_types: &WantedFileTypes,
     ) -> Result<Vec<SongResult>, Error> {
         self.connect().await?;
 
@@ -43,7 +44,7 @@ impl Client {
         let files: Vec<soulseek_rs::File> =
             search_results.into_iter().flat_map(|sr| sr.files).collect();
 
-        Ok(ranker::rank_results(query, &files))
+        Ok(ranker::rank_results(query, &files, wanted_file_types))
     }
 
     /// Initiate a download for a specific result.
@@ -72,10 +73,11 @@ impl Client {
         timeout: Duration,
         // TODO: use a path instead of a string
         download_dir: impl Into<String>,
+        wanted_file_types: &WantedFileTypes,
     ) -> Result<(SongResult, Download, UnboundedReceiver<DownloadStatus>), Error> {
         self.connect().await?;
 
-        let results = self.search(query, timeout).await?;
+        let results = self.search(query, timeout, wanted_file_types).await?;
         let best = results.into_iter().next().ok_or(Error::NoResults)?;
         let (dl, rx) = self.download(&best, download_dir).await?;
         Ok((best, dl, rx))
