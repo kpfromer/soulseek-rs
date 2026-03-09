@@ -4,11 +4,47 @@
 //!   cargo run -p song-rs --example search_and_download
 
 use clap::Parser;
+use clap::ValueEnum;
 use song_rs::{Client, SongQuery};
 use soulseek_rs::types::DownloadStatus;
 use std::io::{self, Write};
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::time::Duration;
+
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+enum FileType {
+    Lossless,
+    Lossy,
+    All,
+}
+
+#[derive(Debug, Clone)]
+struct MusicDuration {
+    duration: Duration,
+}
+
+impl FromStr for MusicDuration {
+    type Err = Box<dyn std::error::Error + Send + Sync>;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if value.contains(':') {
+            let parts = value.split(':').collect::<Vec<&str>>();
+            if parts.len() != 2 {
+                return Err(format!("Invalid duration: {}", value).into());
+            }
+            let minutes = parts[0].parse::<u32>()?;
+            let seconds = parts[1].parse::<u32>()?;
+            let duration = Duration::from_secs(minutes as u64 * 60 + seconds as u64);
+            return Ok(MusicDuration { duration });
+        }
+
+        let duration = value.parse::<u32>()?;
+        Ok(MusicDuration {
+            duration: Duration::from_secs(duration as u64),
+        })
+    }
+}
 
 #[derive(Parser)]
 struct Args {
@@ -37,7 +73,10 @@ struct Args {
     album: Option<String>,
 
     #[arg(long)]
-    duration: Option<u32>,
+    duration: Option<MusicDuration>,
+
+    #[arg(long, default_value = "all")]
+    file_type: FileType,
 }
 
 #[tokio::main]
@@ -63,20 +102,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|| prompt("Song title: "))?;
     let artist = args.artist.map(Ok).unwrap_or_else(|| prompt("Artist: "))?;
     let album = args.album.map(Ok).unwrap_or_else(|| prompt("Album: "))?;
-    let duration_secs = args
+    let duration = args
         .duration
-        .map(Ok::<_, Box<dyn std::error::Error>>)
+        .map(Ok::<_, Box<dyn std::error::Error + Send + Sync>>)
         .unwrap_or_else(|| {
-            let duration = prompt("Duration in seconds: ")?;
-            let duration: u32 = duration.trim().parse()?;
-            Ok(duration)
-        })?;
+            let duration = prompt("Duration: ")?;
+            duration.trim().parse::<MusicDuration>()
+        })
+        .map_err(|e| -> Box<dyn std::error::Error> { e })?;
 
     let query = SongQuery {
         title,
         artist,
         album: Some(album),
-        duration_secs,
+        duration_secs: duration.duration.as_secs() as u32,
     };
 
     // --- Search ---
