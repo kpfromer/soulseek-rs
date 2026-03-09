@@ -434,7 +434,6 @@ dependencies = [
 name = "soulseek-rs-lib"
 version = "0.1.0"
 dependencies = [
- "bytes",
  "socket2 0.5.10",
  "thiserror",
  "tokio",
