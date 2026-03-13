@@ -22,7 +22,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     io::stdin().read_line(&mut password)?;
 
     // Connect and login
-    let mut client = Client::new(username.trim(), password.trim());
+    let client = Client::new(username.trim(), password.trim());
     client.connect().await?;
     println!("Logged in!\n");
 

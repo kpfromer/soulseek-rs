@@ -85,7 +85,7 @@ impl Client {
     }
 
     /// Connect to the Soulseek server and login. Blocks until login succeeds or fails.
-    pub async fn connect(&mut self) -> Result<()> {
+    pub async fn connect(&self) -> Result<()> {
         {
             let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             if matches!(guard.state, ClientState::Connected) {
