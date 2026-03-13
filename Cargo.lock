@@ -427,6 +427,8 @@ dependencies = [
  "soulseek-rs-lib",
  "thiserror",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
  "unicode-normalization",
 ]
 

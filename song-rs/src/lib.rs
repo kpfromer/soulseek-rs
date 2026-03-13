@@ -1,3 +1,6 @@
+#[macro_use]
+pub mod utils;
+
 pub mod error;
 mod parser;
 mod ranker;
@@ -35,6 +38,7 @@ impl Client {
         timeout: Duration,
         wanted_file_types: &WantedFileTypes,
     ) -> Result<Vec<SongResult>, Error> {
+        info!("search: title={}, artist={}", query.title, query.artist);
         self.connect().await?;
 
         let text_query = format!("{} {}", query.title, query.artist);
@@ -44,7 +48,9 @@ impl Client {
         let files: Vec<soulseek_rs::File> =
             search_results.into_iter().flat_map(|sr| sr.files).collect();
 
-        Ok(ranker::rank_results(query, &files, wanted_file_types))
+        let results = ranker::rank_results(query, &files, wanted_file_types);
+        debug!("search returned {} ranked results", results.len());
+        Ok(results)
     }
 
     /// Initiate a download for a specific result.
@@ -54,6 +60,11 @@ impl Client {
         // TODO: use a path instead of a string
         download_dir: impl Into<String>,
     ) -> Result<(Download, UnboundedReceiver<DownloadStatus>), Error> {
+        info!(
+            "download: filename={}, username={}",
+            result.filename.as_str(),
+            result.username
+        );
         self.connect().await?;
 
         let (dl, rx) = self.inner.download(
@@ -79,6 +90,11 @@ impl Client {
 
         let results = self.search(query, timeout, wanted_file_types).await?;
         let best = results.into_iter().next().ok_or(Error::NoResults)?;
+        info!(
+            "download_best: chosen filename={}, score={}",
+            best.filename.as_str(),
+            best.score
+        );
         let (dl, rx) = self.download(&best, download_dir).await?;
         Ok((best, dl, rx))
     }
