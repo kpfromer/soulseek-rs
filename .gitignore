@@ -1,3 +1,5 @@
 /target
 .claude
 downloads
+.env
+.env*

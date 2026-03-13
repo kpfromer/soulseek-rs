@@ -1077,6 +1077,7 @@ name = "musicbrainz"
 version = "0.1.0"
 dependencies = [
  "backon",
+ "clap",
  "governor 0.6.3",
  "musicbrainz_rs",
  "reqwest",
