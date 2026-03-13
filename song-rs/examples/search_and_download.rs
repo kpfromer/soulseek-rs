@@ -114,7 +114,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(Ok)
         .unwrap_or_else(|| prompt("Password: "))?;
 
-    let mut client = Client::new(username, password);
+    let client = Client::new(username, password);
 
     // --- Song query ---
     let title = args
