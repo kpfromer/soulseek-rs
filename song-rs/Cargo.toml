@@ -10,8 +10,8 @@ name = "search_and_download"
 [dependencies]
 soulseek-rs-lib = { path = "../soulseek-rs" }
 thiserror = "2.0.18"
-unicode-normalization = "0.1.25"
 tokio = { version = "1", features = ["full"] }
+unicode-normalization = "0.1.25"
 
 [dev-dependencies]
 clap = { version = "4.5.60", features = ["derive"] }

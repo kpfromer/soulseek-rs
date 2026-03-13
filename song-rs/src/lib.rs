@@ -6,7 +6,7 @@ pub mod types;
 pub use error::Error;
 pub use types::{FileType, SongQuery, SongResult, WantedFileTypes};
 
-use soulseek_rs::types::{Download, DownloadStatus};
+pub use soulseek_rs::types::{Download, DownloadStatus};
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedReceiver;
 
