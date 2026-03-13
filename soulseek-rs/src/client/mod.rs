@@ -206,17 +206,6 @@ impl Client {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn remove_peer(&self, username: &str) {
-        let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(ref active) = guard.active {
-            let ctx = active.context.read().unwrap_or_else(|e| e.into_inner());
-            if let Some(handle) = ctx.peer_registry.remove_peer(username) {
-                let _ = handle.stop();
-            }
-        }
-    }
-
     pub async fn search(&self, query: &str, timeout: Duration) -> Result<Vec<SearchResult>> {
         self.search_with_cancel(query, timeout, None).await
     }

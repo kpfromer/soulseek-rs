@@ -27,14 +27,14 @@ impl Client {
         }
     }
 
-    async fn connect(&mut self) -> Result<(), Error> {
+    async fn connect(&self) -> Result<(), Error> {
         self.inner.connect().await?;
         Ok(())
     }
 
     /// Search Soulseek and return ranked results for the given query.
     pub async fn search(
-        &mut self,
+        &self,
         query: &SongQuery,
         timeout: Duration,
         wanted_file_types: &WantedFileTypes,
@@ -56,7 +56,7 @@ impl Client {
 
     /// Initiate a download for a specific result.
     pub async fn download(
-        &mut self,
+        &self,
         result: &SongResult,
         // TODO: use a path instead of a string
         download_dir: impl Into<String>,
@@ -80,7 +80,7 @@ impl Client {
 
     /// Search and immediately download the best matching result.
     pub async fn download_best(
-        &mut self,
+        &self,
         query: &SongQuery,
         timeout: Duration,
         // TODO: use a path instead of a string
