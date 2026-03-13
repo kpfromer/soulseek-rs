@@ -1,6 +1,7 @@
 use crate::actor::server_actor::{ServerActor, ServerMessage};
 use crate::path::SoulseekPath;
 use crate::search_rate_limiter::SlidingRateLimiter;
+use crate::token::{DownloadToken, SearchToken};
 use crate::types::DownloadStatus;
 use crate::{
     actor::peer_registry::PeerRegistry,
@@ -9,7 +10,6 @@ use crate::{
     types::{Download, Search, SearchResult},
     utils::md5,
 };
-use crate::token::{DownloadToken, SearchToken};
 use crate::{error, info, trace};
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -36,6 +36,8 @@ pub use inner::{ActiveConnection, ClientInner, ClientState, PendingDownload};
 pub use operation::ClientOperation;
 pub use settings::*;
 use state_monitor::{WorkerEvent, state_monitor};
+
+#[derive(Clone)]
 pub struct Client {
     settings: ClientSettings,
     /// Single lock for all mutable state.

@@ -13,7 +13,7 @@ pub use soulseek_rs::types::{Download, DownloadStatus};
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedReceiver;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Client {
     inner: soulseek_rs::Client,
 }

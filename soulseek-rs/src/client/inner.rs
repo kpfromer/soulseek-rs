@@ -1,8 +1,8 @@
 use std::collections::VecDeque;
 
 use crate::DownloadStatus;
-use crate::actor::{ActorHandle, ActorSystem};
 use crate::actor::server_actor::ServerMessage;
+use crate::actor::{ActorHandle, ActorSystem};
 use crate::client::ClientContext;
 use crate::client::ClientOperation;
 use crate::path::SoulseekPath;
