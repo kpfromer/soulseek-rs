@@ -2,6 +2,9 @@
 //!
 //! Run with:
 //!   cargo run -p song-rs --example search_and_download
+//!
+//! With tracing (logs to stderr, set RUST_LOG to control level):
+//!   cargo run -p song-rs --example search_and_download --features tracing
 
 use clap::Parser;
 use clap::ValueEnum;
@@ -90,6 +93,15 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(feature = "tracing")]
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive("song_rs=debug".parse().unwrap())
+                .add_directive("soulseek_rs=debug".parse().unwrap()),
+        )
+        .init();
+
     let args = Args::parse();
 
     // --- Credentials ---
