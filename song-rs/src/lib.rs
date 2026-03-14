@@ -100,9 +100,3 @@ impl Client {
         Ok((best, dl, rx))
     }
 }
-
-impl Drop for Client {
-    fn drop(&mut self) {
-        self.inner.shutdown();
-    }
-}
