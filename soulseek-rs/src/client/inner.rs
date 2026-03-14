@@ -66,6 +66,8 @@ pub struct ClientInner {
 
 impl Drop for ClientInner {
     fn drop(&mut self) {
-        active.actor_system.shutdown();
+        if let Some(active) = &self.active {
+            active.actor_system.shutdown();
+        }
     }
 }
