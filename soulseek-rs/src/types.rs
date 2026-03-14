@@ -152,7 +152,6 @@ impl Download {
 }
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub enum DownloadStatus {
     Queued,
     InProgress {

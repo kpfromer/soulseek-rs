@@ -44,12 +44,6 @@ pub struct Client {
     inner: Arc<Mutex<ClientInner>>,
 }
 
-impl Drop for Client {
-    fn drop(&mut self) {
-        self.shutdown();
-    }
-}
-
 impl Client {
     pub fn new(
         username: impl Into<PlainTextUnencrypted>,
@@ -72,15 +66,6 @@ impl Client {
                 pending_downloads: VecDeque::new(),
                 search_limiter,
             })),
-        }
-    }
-
-    /// Shutdown all spawned tasks (actors, listener, worker).
-    /// Called automatically on drop.
-    pub fn shutdown(&self) {
-        let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(ref active) = guard.active {
-            active.actor_system.shutdown();
         }
     }
 

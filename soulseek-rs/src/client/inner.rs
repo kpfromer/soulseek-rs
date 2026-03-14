@@ -63,3 +63,9 @@ pub struct ClientInner {
     pub pending_downloads: VecDeque<PendingDownload>,
     pub search_limiter: Option<SlidingRateLimiter>,
 }
+
+impl Drop for ClientInner {
+    fn drop(&mut self) {
+        active.actor_system.shutdown();
+    }
+}
