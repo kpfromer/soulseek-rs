@@ -1,6 +1,6 @@
+use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::sync::RwLock;
 
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::UnboundedSender;
@@ -11,12 +11,11 @@ use crate::actor::server_actor::ServerMessage;
 use crate::client::inner::PendingDownload;
 use crate::client::{ClientContext, ClientOperation};
 use crate::path::SoulseekPath;
+use crate::token::DownloadToken;
 use crate::types::DownloadStatus;
+use crate::types::{Download, Search};
 use crate::{debug, error, info, trace, warn};
-use crate::{
-    peer::{ConnectionType, DownloadPeer, Peer},
-    types::Download,
-};
+use crate::peer::{ConnectionType, DownloadPeer, Peer};
 
 /// Owns the incoming-operations loop for a live connection.
 /// Handles all `ClientOperation` messages from actors (server, peers).
@@ -27,7 +26,7 @@ pub struct ConnectedWorker {
     pub op_tx: UnboundedSender<ClientOperation>,
     pub op_rx: UnboundedReceiver<ClientOperation>,
     pub event_tx: UnboundedSender<WorkerEvent>,
-    pub context: Arc<RwLock<ClientContext>>,
+    pub context: Arc<ClientContext>,
     pub cancellation_token: CancellationToken,
     /// Sender to the ServerActor dispatcher. Populated by `SetServerSender` on first connect.
     pub server_sender: Option<UnboundedSender<ServerMessage>>,
@@ -36,6 +35,10 @@ pub struct ConnectedWorker {
     pub pending: VecDeque<PendingDownload>,
     pub max_concurrent: Option<u32>,
     pub active_downloads: u32,
+    /// All known downloads (queued or in-flight).
+    pub downloads: HashMap<DownloadToken, Download>,
+    /// All active searches keyed by query string.
+    pub searches: HashMap<String, Search>,
 }
 
 impl ConnectedWorker {
@@ -87,17 +90,18 @@ impl ConnectedWorker {
                         DownloadStatus::Failed
                     }
                 };
-                {
-                    let mut ctx = self.context.write().unwrap_or_else(|e| e.into_inner());
-                    if let Some(download) = ctx.get_download_by_token(token) {
-                        let _ = download.sender.send(status.clone());
-                    }
-                    ctx.update_download_with_status(token, status);
+                if let Some(download) = self.downloads.get(&token) {
+                    let _ = download.sender.send(status.clone());
+                }
+                if let Some(download) = self.downloads.get_mut(&token) {
+                    download.status = status;
                 }
                 self.active_downloads = self.active_downloads.saturating_sub(1);
                 self.try_dequeue_next();
             }
             ClientOperation::RequestDownload(pd) => {
+                // Insert immediately so it's visible to queries even while queued.
+                self.downloads.insert(pd.token, pd.to_download());
                 if self.logged_in && self.max_concurrent.is_none_or(|max| self.active_downloads < max) {
                     self.try_initiate(pd);
                 } else {
@@ -108,15 +112,15 @@ impl ConnectedWorker {
                 let context = self.context.clone();
                 let own_username = self.own_username.clone();
                 let op_tx = self.op_tx.clone();
+                let downloads = self.downloads.clone();
                 tokio::spawn(async move {
-                    Self::connect_to_peer(peer, context, own_username, None, op_tx);
+                    Self::connect_to_peer(peer, context, own_username, None, op_tx, downloads);
                 });
             }
             ClientOperation::SearchResult(search_result) => {
                 trace!("[worker] SearchResult {:?}", search_result);
-                let mut context = self.context.write().unwrap_or_else(|e| e.into_inner());
                 let result_token = search_result.token;
-                for search in context.searches.values_mut() {
+                for search in self.searches.values_mut() {
                     if search.token == result_token {
                         search.results.push(search_result);
                         break;
@@ -124,11 +128,8 @@ impl ConnectedWorker {
                 }
             }
             ClientOperation::PeerDisconnected(username, maybe_error) => {
-                {
-                    let context = self.context.read().unwrap_or_else(|e| e.into_inner());
-                    if let Some(handle) = context.peer_registry.remove_peer(&username) {
-                        let _ = handle.stop();
-                    }
+                if let Some(handle) = self.context.peer_registry.remove_peer(&username) {
+                    let _ = handle.stop();
                 }
                 if let Some(error) = maybe_error {
                     warn!(
@@ -157,13 +158,11 @@ impl ConnectedWorker {
                     self.own_username.clone(),
                     None,
                     self.op_tx.clone(),
+                    self.downloads.clone(),
                 );
             }
             ClientOperation::DownloadFromPeer(token, peer, _allowed) => {
-                let maybe_download = {
-                    let ctx = self.context.read().unwrap_or_else(|e| e.into_inner());
-                    ctx.get_download_by_token(token).cloned()
-                };
+                let maybe_download = self.downloads.get(&token).cloned();
                 let own_username = self.own_username.clone();
                 let op_tx = self.op_tx.clone();
 
@@ -215,12 +214,7 @@ impl ConnectedWorker {
                 }
             }
             ClientOperation::NewPeer(new_peer) => {
-                let peer_exists = self
-                    .context
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .peer_registry
-                    .contains(&new_peer.username);
+                let peer_exists = self.context.peer_registry.contains(&new_peer.username);
 
                 if peer_exists {
                     debug!("Already connected to {}", new_peer.username);
@@ -253,6 +247,7 @@ impl ConnectedWorker {
                     self.own_username.clone(),
                     Some(new_peer.tcp_stream),
                     self.op_tx.clone(),
+                    self.downloads.clone(),
                 );
             }
             ClientOperation::GetPeerAddressResponse {
@@ -267,12 +262,7 @@ impl ConnectedWorker {
                     username, host, port, obfuscation_type, obfuscated_port
                 );
 
-                let peer_exists = self
-                    .context
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .peer_registry
-                    .contains(&username);
+                let peer_exists = self.context.peer_registry.contains(&username);
 
                 if !peer_exists {
                     let peer = Peer::new(
@@ -288,15 +278,14 @@ impl ConnectedWorker {
                     let context = self.context.clone();
                     let own_username = self.own_username.clone();
                     let op_tx = self.op_tx.clone();
+                    let downloads = self.downloads.clone();
                     tokio::spawn(async move {
-                        Self::connect_to_peer(peer, context, own_username, None, op_tx);
+                        Self::connect_to_peer(peer, context, own_username, None, op_tx, downloads);
                     });
                 }
             }
             ClientOperation::UpdateDownloadTokens(transfer, username) => {
-                let mut context = self.context.write().unwrap_or_else(|e| e.into_inner());
-
-                let download_to_update = context.get_downloads().into_iter().find_map(|d| {
+                let download_to_update = self.downloads.values().find_map(|d| {
                     if d.username == username && d.filename == transfer.filename {
                         Some((d.token, d.clone()))
                     } else {
@@ -309,7 +298,7 @@ impl ConnectedWorker {
                         "[worker] UpdateDownloadTokens found {old_token}, transfer: {:?}",
                         transfer
                     );
-                    context.add_download(Download {
+                    self.downloads.insert(transfer.token, Download {
                         username: username.clone(),
                         filename: transfer.filename,
                         token: transfer.token,
@@ -320,7 +309,7 @@ impl ConnectedWorker {
                         cancel: download.cancel.clone(),
                         progress_timeout: download.progress_timeout,
                     });
-                    context.remove_download(old_token);
+                    self.downloads.remove(&old_token);
                 }
             }
             ClientOperation::UploadFailed(username, filename) => {
@@ -334,14 +323,40 @@ impl ConnectedWorker {
                 self.server_sender = Some(sender);
                 debug!("[worker] Server sender initialized");
             }
+            ClientOperation::InitiateSearch(key, token) => {
+                self.searches.insert(key, Search { token, results: vec![] });
+            }
+            ClientOperation::QueryDownloadByToken(token, tx) => {
+                let _ = tx.send(self.downloads.get(&token).cloned());
+            }
+            ClientOperation::QueryDownloads(tx) => {
+                let _ = tx.send(self.downloads.values().cloned().collect());
+            }
+            ClientOperation::QuerySearchResults(key, tx) => {
+                let _ = tx.send(
+                    self.searches
+                        .get(&key)
+                        .map(|s| s.results.clone())
+                        .unwrap_or_default(),
+                );
+            }
+            ClientOperation::QuerySearchResultsCount(key, tx) => {
+                let _ = tx.send(
+                    self.searches.get(&key).map(|s| s.results.len()).unwrap_or(0),
+                );
+            }
+            ClientOperation::QueryAllSearches(tx) => {
+                let _ = tx.send(self.searches.clone());
+            }
         }
     }
 
-    /// Initiate a download: add to context and queue upload with the peer registry.
+    /// Initiate a download: ensure it's in the downloads map, queue upload with peer registry,
+    /// and increment active_downloads counter.
     fn try_initiate(&mut self, pd: PendingDownload) {
-        let mut ctx = self.context.write().unwrap_or_else(|e| e.into_inner());
-        ctx.add_download(pd.to_download());
-        let _ = ctx.peer_registry.queue_upload(&pd.username, pd.filename.clone());
+        // Insert/update so pre-pending items are also visible.
+        self.downloads.insert(pd.token, pd.to_download());
+        let _ = self.context.peer_registry.queue_upload(&pd.username, pd.filename.clone());
         self.active_downloads += 1;
     }
 
@@ -372,35 +387,32 @@ impl ConnectedWorker {
     }
 
     fn process_failed_uploads(&mut self, username: &str, filename: Option<&SoulseekPath>) {
-        let failed_count = {
-            let mut ctx = self.context.write().unwrap_or_else(|e| e.into_inner());
-            let failed_tokens: Vec<_> = ctx
-                .downloads
-                .values()
-                .filter(|d| d.username == username && filename.is_none_or(|f| d.filename == *f))
-                .map(|d| {
-                    let _ = d.sender.send(DownloadStatus::Failed);
-                    d.token
-                })
-                .collect();
-            let count = failed_tokens.len();
-            for token in failed_tokens {
-                ctx.remove_download(token);
-            }
-            count
-        };
-        self.active_downloads = self.active_downloads.saturating_sub(failed_count as u32);
-        if failed_count > 0 {
+        let failed_tokens: Vec<_> = self
+            .downloads
+            .values()
+            .filter(|d| d.username == username && filename.is_none_or(|f| d.filename == *f))
+            .map(|d| {
+                let _ = d.sender.send(DownloadStatus::Failed);
+                d.token
+            })
+            .collect();
+        let count = failed_tokens.len();
+        for token in failed_tokens {
+            self.downloads.remove(&token);
+        }
+        self.active_downloads = self.active_downloads.saturating_sub(count as u32);
+        if count > 0 {
             self.try_dequeue_next();
         }
     }
 
     fn connect_to_peer(
         peer: Peer,
-        context: Arc<RwLock<ClientContext>>,
+        context: Arc<ClientContext>,
         own_username: String,
         stream: Option<std::net::TcpStream>,
         op_tx: UnboundedSender<ClientOperation>,
+        downloads: HashMap<DownloadToken, Download>,
     ) {
         let peer_clone = peer.clone();
         trace!(
@@ -414,8 +426,7 @@ impl ConnectedWorker {
                     s.set_nonblocking(true).ok();
                     tokio::net::TcpStream::from_std(s).ok()
                 });
-                let ctx = context.read().unwrap_or_else(|e| e.into_inner());
-                match ctx.peer_registry.register_peer(peer_clone, tokio_stream, None) {
+                match context.peer_registry.register_peer(peer_clone, tokio_stream, None) {
                     Ok(_) => (),
                     Err(e) => {
                         trace!("Failed to spawn peer actor for {:?}: {:?}", username, e);
@@ -435,15 +446,7 @@ impl ConnectedWorker {
                     own_username,
                 );
                 tokio::task::spawn_blocking(move || {
-                    let resolve = {
-                        let ctx = context.clone();
-                        move |token| {
-                            ctx.read()
-                                .unwrap_or_else(|e| e.into_inner())
-                                .get_download_by_token(token)
-                                .cloned()
-                        }
-                    };
+                    let resolve = move |token: DownloadToken| downloads.get(&token).cloned();
                     match download_peer.download_pierced(resolve, stream) {
                         Ok((download, path)) => {
                             trace!("[worker] downloaded {} bytes {:?}", path, download.size);

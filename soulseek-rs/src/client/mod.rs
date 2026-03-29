@@ -11,17 +11,13 @@ use crate::{
     utils::md5,
 };
 use crate::{error, info, trace};
+use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use std::{
-    collections::HashMap,
-    sync::{
-        RwLock,
-        atomic::{AtomicBool, Ordering},
-    },
-};
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 
 mod connected_worker;
 mod context;
@@ -102,7 +98,7 @@ impl Client {
         let context = {
             let peer_registry =
                 PeerRegistry::new(actor_system.clone(), op_tx.clone(), username.clone());
-            Arc::new(RwLock::new(ClientContext::new(peer_registry)))
+            Arc::new(ClientContext::new(peer_registry))
         };
 
         // Drain any pre-connect pending downloads into the worker's queue.
@@ -124,6 +120,8 @@ impl Client {
             pending: pre_pending,
             max_concurrent,
             active_downloads: 0,
+            downloads: HashMap::new(),
+            searches: HashMap::new(),
         };
         tokio::spawn(async move { worker.run().await });
 
@@ -150,7 +148,6 @@ impl Client {
             let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             guard.active = Some(ActiveConnection {
                 server_handle: server_handle.clone(),
-                context: context.clone(),
                 op_tx: op_tx.clone(),
                 actor_system: actor_system.clone(),
             });
@@ -178,7 +175,7 @@ impl Client {
         }
 
         // Send Login — queued by ServerActor until TCP is ready.
-        let (login_tx, login_rx) = tokio::sync::oneshot::channel();
+        let (login_tx, login_rx) = oneshot::channel();
         let _ = server_handle.send(ServerMessage::Login {
             username: username.clone(),
             password: password.clone(),
@@ -217,6 +214,16 @@ impl Client {
         Ok(())
     }
 
+    /// Helper to get a cloned op_tx from the active connection, or NotConnected.
+    fn get_op_tx(&self) -> Result<tokio::sync::mpsc::UnboundedSender<ClientOperation>> {
+        let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        guard
+            .active
+            .as_ref()
+            .map(|a| a.op_tx.clone())
+            .ok_or(SoulseekRs::NotConnected)
+    }
+
     pub async fn search_with_cancel(
         &self,
         query: &str,
@@ -225,12 +232,12 @@ impl Client {
     ) -> Result<Vec<SearchResult>> {
         info!("Searching for {}", query);
 
-        // Record search and get connection handles
-        let (server_handle, context) = {
+        // Get connection handles
+        let (server_handle, op_tx) = {
             self.wait_for_search_rate_limit().await?;
             let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             match guard.active.as_ref() {
-                Some(active) => (active.server_handle.clone(), active.context.clone()),
+                Some(active) => (active.server_handle.clone(), active.op_tx.clone()),
                 None => return Err(SoulseekRs::NotConnected),
             }
         };
@@ -238,19 +245,8 @@ impl Client {
         let hash = md5::md5(query);
         let token = SearchToken(u32::from_str_radix(&hash[0..5], 16)?);
 
-        // Insert search entry and send FileSearch
-        context
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .searches
-            .insert(
-                query.to_string(),
-                Search {
-                    token,
-                    results: Vec::new(),
-                },
-            );
-
+        // Register search in worker and send FileSearch to server
+        let _ = op_tx.send(ClientOperation::InitiateSearch(query.to_string(), token));
         let _ = server_handle.send(ServerMessage::FileSearch {
             token,
             query: query.to_string(),
@@ -273,77 +269,38 @@ impl Client {
             }
         }
 
-        Ok(self.get_search_results(query))
+        // Query results from worker
+        let (tx, rx) = oneshot::channel();
+        let _ = op_tx.send(ClientOperation::QuerySearchResults(query.to_string(), tx));
+        rx.await.map_err(|_| SoulseekRs::NotConnected)
     }
 
-    pub fn get_search_results_count(&self, search_key: &str) -> usize {
-        let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(ref active) = guard.active {
-            active
-                .context
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .searches
-                .get(search_key)
-                .map(|s| s.results.len())
-                .unwrap_or(0)
-        } else {
-            0
-        }
+    pub async fn get_search_results_count(&self, search_key: &str) -> Result<usize> {
+        let op_tx = self.get_op_tx()?;
+        let (tx, rx) = oneshot::channel();
+        let _ = op_tx.send(ClientOperation::QuerySearchResultsCount(search_key.to_string(), tx));
+        rx.await.map_err(|_| SoulseekRs::NotConnected)
     }
 
-    pub fn get_search_results(&self, search_key: &str) -> Vec<SearchResult> {
-        let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(ref active) = guard.active {
-            active
-                .context
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .searches
-                .get(search_key)
-                .map(|s| s.results.clone())
-                .unwrap_or_default()
-        } else {
-            vec![]
-        }
+    pub async fn get_search_results(&self, search_key: &str) -> Result<Vec<SearchResult>> {
+        let op_tx = self.get_op_tx()?;
+        let (tx, rx) = oneshot::channel();
+        let _ = op_tx.send(ClientOperation::QuerySearchResults(search_key.to_string(), tx));
+        rx.await.map_err(|_| SoulseekRs::NotConnected)
     }
 
-    /// Non-blocking variant that returns None if the lock is unavailable.
-    pub fn try_get_search_results(&self, search_key: &str) -> Option<Vec<SearchResult>> {
-        let guard = self.inner.try_lock().ok()?;
-        let active = guard.active.as_ref()?;
-        active
-            .context
-            .try_read()
-            .ok()
-            .and_then(|ctx| ctx.searches.get(search_key).map(|s| s.results.clone()))
+    pub async fn get_all_searches(&self) -> Result<HashMap<String, Search>> {
+        let op_tx = self.get_op_tx()?;
+        let (tx, rx) = oneshot::channel();
+        let _ = op_tx.send(ClientOperation::QueryAllSearches(tx));
+        rx.await.map_err(|_| SoulseekRs::NotConnected)
     }
 
-    pub fn get_all_searches(&self) -> HashMap<String, Search> {
-        let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(ref active) = guard.active {
-            active
-                .context
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .searches
-                .clone()
-        } else {
-            HashMap::new()
-        }
-    }
-
-    pub fn get_all_downloads(&self) -> Vec<Download> {
-        let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(ref active) = guard.active {
-            active
-                .context
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .get_downloads()
-        } else {
-            vec![]
-        }
+    pub async fn get_all_downloads(&self) -> Result<Vec<Download>> {
+        let op_tx = self.get_op_tx()?;
+        let (tx, rx) = oneshot::channel();
+        let _ = op_tx.send(ClientOperation::QueryDownloads(tx));
+        rx.await.map_err(|_| SoulseekRs::NotConnected)
     }
 
     pub fn download(
@@ -380,12 +337,7 @@ impl Client {
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
 
         if let Some(ref active) = guard.active {
-            // Active connection exists — add to context and let the worker route it.
-            active
-                .context
-                .write()
-                .unwrap_or_else(|e| e.into_inner())
-                .add_download(download.clone());
+            // Active connection — worker handles insertion and routing.
             let _ = active.op_tx.send(ClientOperation::RequestDownload(pending));
         } else {
             // No active connection yet — buffer until connect().
@@ -401,40 +353,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_client_context_downloads() {
+    fn test_client_context_construction() {
         use crate::actor::ActorSystem;
-        use crate::token::DownloadToken;
         let actor_system = Arc::new(ActorSystem::new());
         let (op_tx, _) = mpsc::unbounded_channel();
         let registry = PeerRegistry::new(actor_system, op_tx, "test".to_string());
-        let mut context = ClientContext::new(registry);
-        let token = DownloadToken(123);
-        let download = Download {
-            username: "test".to_string(),
-            filename: SoulseekPath::from("test.txt"),
-            token,
-            size: 100,
-            download_directory: "test".to_string(),
-            status: DownloadStatus::Queued,
-            sender: mpsc::unbounded_channel().0,
-            cancel: Arc::new(AtomicBool::new(false)),
-            progress_timeout: None,
-        };
-        context.add_download(download);
-        assert!(context.get_download_by_token(token).is_some());
-        assert_eq!(context.get_download_tokens(), vec![token]);
-        assert_eq!(context.get_downloads().len(), 1);
-        if let Some(download) = context.get_download_by_token_mut(token) {
-            assert_eq!(download.token, token);
-            download.status = DownloadStatus::Failed;
-        }
-        assert!(matches!(
-            context.get_download_by_token(token).unwrap().status,
-            DownloadStatus::Failed
-        ));
-        context.remove_download(token);
-        assert_eq!(context.get_downloads().len(), 0);
-        assert!(context.get_download_by_token(token).is_none());
+        let context = ClientContext::new(registry);
+        // Just verify it constructs without panic
+        drop(context);
     }
 
     #[test]
