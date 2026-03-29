@@ -223,11 +223,14 @@ impl DownloadPeer {
     /// Sends a pierce-firewall handshake, reads a 4-byte token from the peer,
     /// calls `resolve_download` to look up the corresponding `Download`,
     /// then streams data to disk.
+    ///
+    /// On error, returns `(Option<DownloadToken>, DownloadError)` where the token is `Some` if it
+    /// was resolved before the failure, or `None` if the failure occurred during the handshake.
     pub fn download_pierced(
         self,
         resolve_download: impl Fn(DownloadToken) -> Option<Download>,
         stream: Option<TcpStream>,
-    ) -> Result<(Download, String), DownloadError> {
+    ) -> Result<(Download, String), (Option<DownloadToken>, DownloadError)> {
         trace!(
             "[download_peer:{}] download_pierced, stream present: {}",
             self.username,
@@ -236,15 +239,15 @@ impl DownloadPeer {
 
         let mut stream = match stream {
             Some(s) => s,
-            None => self.establish_connection()?,
+            None => self.establish_connection().map_err(|e| (None, e))?,
         };
 
         // Send pierce-firewall message so the peer can identify this connection.
         let message = MessageFactory::build_pierce_firewall_message(self.token);
         stream
             .write_all(&message.get_buffer())
-            .map_err(DownloadError::HandshakeFailed)?;
-        stream.flush().map_err(DownloadError::HandshakeFailed)?;
+            .map_err(|e| (None, DownloadError::HandshakeFailed(e)))?;
+        stream.flush().map_err(|e| (None, DownloadError::HandshakeFailed(e)))?;
 
         trace!(
             "[download_peer:{}] sent pierce firewall token: {}",
@@ -255,14 +258,16 @@ impl DownloadPeer {
         let mut first_buf = [0u8; READ_BUFFER_SIZE];
         let first_read = stream
             .read(&mut first_buf)
-            .map_err(DownloadError::StreamReadError)?;
+            .map_err(|e| (None, DownloadError::StreamReadError(e)))?;
 
         if first_read < 4 {
-            return Err(DownloadError::InvalidTokenBytes);
+            return Err((None, DownloadError::InvalidTokenBytes));
         }
 
         let token = DownloadToken(u32::from_le_bytes(
-            first_buf[..4].try_into().map_err(|_| DownloadError::InvalidTokenBytes)?,
+            first_buf[..4]
+                .try_into()
+                .map_err(|_| (None, DownloadError::InvalidTokenBytes))?,
         ));
 
         trace!(
@@ -270,14 +275,18 @@ impl DownloadPeer {
             self.username, token
         );
 
-        let download = resolve_download(token).ok_or(DownloadError::TokenNotFound(token))?;
+        // Token is now known — all subsequent errors carry Some(token).
+        let download = resolve_download(token)
+            .ok_or((Some(token), DownloadError::TokenNotFound(token)))?;
 
         stream
             .write_all(&START_DOWNLOAD)
-            .map_err(DownloadError::StreamWriteError)?;
+            .map_err(|e| (Some(token), DownloadError::StreamWriteError(e)))?;
 
-        let path = Self::resolve_download_path(&download)?;
-        let mut writer = Self::open_output_file(&path)?;
+        let path =
+            Self::resolve_download_path(&download).map_err(|e| (Some(token), e))?;
+        let mut writer =
+            Self::open_output_file(&path).map_err(|e| (Some(token), e))?;
 
         // Any bytes after the 4-byte token in the first chunk are the start of file data.
         let mut total_bytes: usize = 0;
@@ -285,7 +294,7 @@ impl DownloadPeer {
             let initial_data = &first_buf[4..first_read];
             writer
                 .write_all(initial_data)
-                .map_err(DownloadError::FileWriteError)?;
+                .map_err(|e| (Some(token), DownloadError::FileWriteError(e)))?;
             total_bytes += initial_data.len();
 
             // Send progress if the initial chunk is already large enough.
@@ -304,9 +313,12 @@ impl DownloadPeer {
             &mut writer,
             &download,
             total_bytes,
-        )?;
+        )
+        .map_err(|e| (Some(token), e))?;
 
-        writer.flush().map_err(DownloadError::FileWriteError)?;
+        writer
+            .flush()
+            .map_err(|e| (Some(token), DownloadError::FileWriteError(e)))?;
 
         trace!(
             "[download_peer:{}] download_pierced complete: {} bytes → {}",

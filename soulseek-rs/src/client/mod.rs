@@ -353,6 +353,7 @@ impl Client {
         size: u64,
         download_directory: String,
         progress_timeout: Option<Duration>,
+        recv_timeout: Option<Duration>,
     ) -> Result<(Download, DownloadHandle)> {
         let filename: SoulseekPath = filename.into();
         info!("[client] Downloading {} from {}", filename, username);
@@ -374,7 +375,7 @@ impl Client {
             progress_timeout,
         };
         let download = pending.to_download();
-        let handle = DownloadHandle::new(download_receiver, cancel, progress_timeout);
+        let handle = DownloadHandle::new(download_receiver, cancel, progress_timeout, recv_timeout);
 
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
 

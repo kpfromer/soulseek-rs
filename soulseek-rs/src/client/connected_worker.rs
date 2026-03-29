@@ -135,7 +135,7 @@ impl ConnectedWorker {
                         "[worker] Peer {} disconnected with error: {:?}",
                         username, error
                     );
-                    Self::process_failed_uploads(self.context.clone(), &username, None);
+                    self.process_failed_uploads(&username, None);
                 }
             }
             ClientOperation::PierceFireWall(peer) => {
@@ -324,7 +324,11 @@ impl ConnectedWorker {
                 }
             }
             ClientOperation::UploadFailed(username, filename) => {
-                Self::process_failed_uploads(self.context.clone(), &username, Some(&filename));
+                self.process_failed_uploads(&username, Some(&filename));
+            }
+            ClientOperation::PierceFirewallPreTokenFailed => {
+                self.active_downloads = self.active_downloads.saturating_sub(1);
+                self.try_dequeue_next();
             }
             ClientOperation::SetServerSender(sender) => {
                 self.server_sender = Some(sender);
@@ -367,23 +371,27 @@ impl ConnectedWorker {
         }
     }
 
-    fn process_failed_uploads(
-        context: Arc<RwLock<ClientContext>>,
-        username: &str,
-        filename: Option<&SoulseekPath>,
-    ) {
-        let mut ctx = context.write().unwrap_or_else(|e| e.into_inner());
-        let failed_tokens: Vec<_> = ctx
-            .downloads
-            .values()
-            .filter(|d| d.username == username && filename.is_none_or(|f| d.filename == *f))
-            .map(|d| {
-                let _ = d.sender.send(DownloadStatus::Failed);
-                d.token
-            })
-            .collect();
-        for token in failed_tokens {
-            ctx.remove_download(token);
+    fn process_failed_uploads(&mut self, username: &str, filename: Option<&SoulseekPath>) {
+        let failed_count = {
+            let mut ctx = self.context.write().unwrap_or_else(|e| e.into_inner());
+            let failed_tokens: Vec<_> = ctx
+                .downloads
+                .values()
+                .filter(|d| d.username == username && filename.is_none_or(|f| d.filename == *f))
+                .map(|d| {
+                    let _ = d.sender.send(DownloadStatus::Failed);
+                    d.token
+                })
+                .collect();
+            let count = failed_tokens.len();
+            for token in failed_tokens {
+                ctx.remove_download(token);
+            }
+            count
+        };
+        self.active_downloads = self.active_downloads.saturating_sub(failed_count as u32);
+        if failed_count > 0 {
+            self.try_dequeue_next();
         }
     }
 
@@ -436,26 +444,42 @@ impl ConnectedWorker {
                                 .cloned()
                         }
                     };
-                    let result = download_peer
-                        .download_pierced(resolve, stream)
-                        .map(|(download, path)| {
+                    match download_peer.download_pierced(resolve, stream) {
+                        Ok((download, path)) => {
                             trace!("[worker] downloaded {} bytes {:?}", path, download.size);
-                            (download.token, path)
-                        });
-                    match result {
-                        Ok((token, path)) => {
-                            let _ = op_tx.send(ClientOperation::DownloadCompleted(token, Ok(path)));
+                            let _ = op_tx
+                                .send(ClientOperation::DownloadCompleted(download.token, Ok(path)));
                         }
-                        Err(crate::peer::download_peer::DownloadError::Cancelled) => {
-                            // Token isn't available pre-handshake; pierce path drops silently.
+                        Err((
+                            Some(token),
+                            crate::peer::download_peer::DownloadError::Cancelled,
+                        )) => {
                             trace!("[worker] pierced download cancelled");
+                            let _ = op_tx.send(ClientOperation::DownloadCompleted(
+                                token,
+                                Err(crate::error::SoulseekRs::DownloadCancelled),
+                            ));
                         }
-                        Err(crate::peer::download_peer::DownloadError::NoProgressTimeout) => {
+                        Err((
+                            Some(token),
+                            crate::peer::download_peer::DownloadError::NoProgressTimeout,
+                        )) => {
                             trace!("[worker] pierced download timed out");
+                            let _ = op_tx.send(ClientOperation::DownloadCompleted(
+                                token,
+                                Err(crate::error::SoulseekRs::DownloadTimedOut),
+                            ));
                         }
-                        Err(e) => {
-                            trace!("[worker] failed to download: {}", e);
-                            // No token available from pierce failure — slot freed without context update.
+                        Err((Some(token), e)) => {
+                            error!("[worker] pierced download failed: {}", e);
+                            let _ = op_tx.send(ClientOperation::DownloadCompleted(
+                                token,
+                                Err(crate::error::SoulseekRs::InvalidMessage(e.to_string())),
+                            ));
+                        }
+                        Err((None, e)) => {
+                            warn!("[worker] pierce-firewall pre-token failure: {}", e);
+                            let _ = op_tx.send(ClientOperation::PierceFirewallPreTokenFailed);
                         }
                     }
                 });

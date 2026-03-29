@@ -79,6 +79,7 @@ impl Client {
             // TODO: use a path instead of a string
             download_dir.into(),
             progress_timeout,
+            None,
         )?;
         Ok((dl, handle))
     }
