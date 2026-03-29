@@ -13,9 +13,9 @@ use crate::{
 use crate::{error, info, trace};
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 
@@ -40,6 +40,10 @@ pub struct Client {
     settings: ClientSettings,
     /// Single lock for all mutable state.
     inner: Arc<Mutex<ClientInner>>,
+    /// The search rate limiter.
+    /// This is used to limit the number of searches that can be performed concurrently.
+    /// It is used to prevent abuse, and being banned.
+    search_limiter: Option<SlidingRateLimiter>,
 }
 
 impl Client {
@@ -62,8 +66,8 @@ impl Client {
                 state: ClientState::Disconnected,
                 active: None,
                 pending_downloads: VecDeque::new(),
-                search_limiter,
             })),
+            search_limiter,
         }
     }
 
@@ -196,21 +200,14 @@ impl Client {
     }
 
     async fn wait_for_search_rate_limit(&self) -> Result<()> {
-        let wait = {
-            if let Some(ref mut lim) = self
-                .inner
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .search_limiter
-            {
-                Some(lim.clone().acquire())
-            } else {
-                None
-            }
-        };
-        if let Some(wait) = wait {
-            wait.await;
+        if let Some(wait) = self
+            .search_limiter
+            .as_ref()
+            .map(|lim| lim.clone().acquire())
+        {
+            wait.await
         }
+
         Ok(())
     }
 
@@ -278,14 +275,20 @@ impl Client {
     pub async fn get_search_results_count(&self, search_key: &str) -> Result<usize> {
         let op_tx = self.get_op_tx()?;
         let (tx, rx) = oneshot::channel();
-        let _ = op_tx.send(ClientOperation::QuerySearchResultsCount(search_key.to_string(), tx));
+        let _ = op_tx.send(ClientOperation::QuerySearchResultsCount(
+            search_key.to_string(),
+            tx,
+        ));
         rx.await.map_err(|_| SoulseekRs::NotConnected)
     }
 
     pub async fn get_search_results(&self, search_key: &str) -> Result<Vec<SearchResult>> {
         let op_tx = self.get_op_tx()?;
         let (tx, rx) = oneshot::channel();
-        let _ = op_tx.send(ClientOperation::QuerySearchResults(search_key.to_string(), tx));
+        let _ = op_tx.send(ClientOperation::QuerySearchResults(
+            search_key.to_string(),
+            tx,
+        ));
         rx.await.map_err(|_| SoulseekRs::NotConnected)
     }
 

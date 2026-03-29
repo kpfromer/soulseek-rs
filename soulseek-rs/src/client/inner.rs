@@ -66,7 +66,6 @@ pub struct ClientInner {
     pub active: Option<ActiveConnection>,
     /// Downloads queued before connect() is ever called; seeded into the worker on first connect.
     pub pending_downloads: VecDeque<PendingDownload>,
-    pub search_limiter: Option<SlidingRateLimiter>,
 }
 
 impl Drop for ClientInner {
