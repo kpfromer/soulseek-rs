@@ -136,7 +136,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let candidate_count = results.len();
         let mut succeeded = false;
 
-        'candidates: for (attempt, result) in results.iter().enumerate() {
+        'candidates: for (attempt, result) in results.iter().take(10).enumerate() {
             let attempt_label = format!(
                 "[{}/{}] {label}  (candidate {}/{})",
                 i + 1,
@@ -147,7 +147,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             track_bar.set_message(attempt_label.clone());
             track_bar.set_position(0);
 
-            let (_dl, mut handle) = match client.download(result, &download_dir, None).await {
+            let (_dl, mut handle) = match client
+                .download(result, &download_dir, Some(Duration::from_secs(30)))
+                .await
+            {
                 Ok(pair) => pair,
                 Err(_) => continue,
             };
