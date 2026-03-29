@@ -47,6 +47,18 @@ pub struct Client {
 }
 
 impl Client {
+    async fn wait_for_search_rate_limit(&self) -> Result<()> {
+        if let Some(wait) = self
+            .search_limiter
+            .as_ref()
+            .map(|lim| lim.clone().acquire())
+        {
+            wait.await
+        }
+
+        Ok(())
+    }
+
     pub fn new(
         username: impl Into<PlainTextUnencrypted>,
         password: impl Into<PlainTextUnencrypted>,
@@ -195,32 +207,6 @@ impl Client {
         }
     }
 
-    pub async fn search(&self, query: &str, timeout: Duration) -> Result<Vec<SearchResult>> {
-        self.search_with_cancel(query, timeout, None).await
-    }
-
-    async fn wait_for_search_rate_limit(&self) -> Result<()> {
-        if let Some(wait) = self
-            .search_limiter
-            .as_ref()
-            .map(|lim| lim.clone().acquire())
-        {
-            wait.await
-        }
-
-        Ok(())
-    }
-
-    /// Helper to get a cloned op_tx from the active connection, or NotConnected.
-    fn get_op_tx(&self) -> Result<tokio::sync::mpsc::UnboundedSender<ClientOperation>> {
-        let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        guard
-            .active
-            .as_ref()
-            .map(|a| a.op_tx.clone())
-            .ok_or(SoulseekRs::NotConnected)
-    }
-
     pub async fn search_with_cancel(
         &self,
         query: &str,
@@ -272,38 +258,8 @@ impl Client {
         rx.await.map_err(|_| SoulseekRs::NotConnected)
     }
 
-    pub async fn get_search_results_count(&self, search_key: &str) -> Result<usize> {
-        let op_tx = self.get_op_tx()?;
-        let (tx, rx) = oneshot::channel();
-        let _ = op_tx.send(ClientOperation::QuerySearchResultsCount(
-            search_key.to_string(),
-            tx,
-        ));
-        rx.await.map_err(|_| SoulseekRs::NotConnected)
-    }
-
-    pub async fn get_search_results(&self, search_key: &str) -> Result<Vec<SearchResult>> {
-        let op_tx = self.get_op_tx()?;
-        let (tx, rx) = oneshot::channel();
-        let _ = op_tx.send(ClientOperation::QuerySearchResults(
-            search_key.to_string(),
-            tx,
-        ));
-        rx.await.map_err(|_| SoulseekRs::NotConnected)
-    }
-
-    pub async fn get_all_searches(&self) -> Result<HashMap<String, Search>> {
-        let op_tx = self.get_op_tx()?;
-        let (tx, rx) = oneshot::channel();
-        let _ = op_tx.send(ClientOperation::QueryAllSearches(tx));
-        rx.await.map_err(|_| SoulseekRs::NotConnected)
-    }
-
-    pub async fn get_all_downloads(&self) -> Result<Vec<Download>> {
-        let op_tx = self.get_op_tx()?;
-        let (tx, rx) = oneshot::channel();
-        let _ = op_tx.send(ClientOperation::QueryDownloads(tx));
-        rx.await.map_err(|_| SoulseekRs::NotConnected)
+    pub async fn search(&self, query: &str, timeout: Duration) -> Result<Vec<SearchResult>> {
+        self.search_with_cancel(query, timeout, None).await
     }
 
     pub fn download(
