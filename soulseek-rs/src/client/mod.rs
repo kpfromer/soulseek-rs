@@ -374,7 +374,7 @@ impl Client {
             progress_timeout,
         };
         let download = pending.to_download();
-        let handle = DownloadHandle::new(download_receiver, cancel);
+        let handle = DownloadHandle::new(download_receiver, cancel, progress_timeout);
 
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
 

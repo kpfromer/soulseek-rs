@@ -148,7 +148,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             track_bar.set_position(0);
 
             let (_dl, mut handle) = match client
-                .download(result, &download_dir, Some(Duration::from_secs(30)))
+                .download(result, &download_dir, Some(Duration::from_secs(10)))
                 .await
             {
                 Ok(pair) => pair,
