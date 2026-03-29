@@ -4,6 +4,7 @@ use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::net::ToSocketAddrs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use crate::message::server::MessageFactory;
@@ -14,6 +15,10 @@ use crate::types::{Download, DownloadStatus};
 const START_DOWNLOAD: [u8; 8] = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
 const READ_BUFFER_SIZE: usize = 8192;
 const PROGRESS_UPDATE_CHUNKS: usize = 15; // ~120KB (15 * 8192 bytes)
+/// How often the read loop wakes up to check cancel/timeout flags when the peer is silent.
+const READ_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+/// Hard stall timeout: give up if no bytes arrive within this window.
+const STALL_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug)]
 pub enum DownloadError {
@@ -27,6 +32,10 @@ pub enum DownloadError {
     FileWriteError(io::Error),
     PathResolutionError(String),
     InvalidTokenBytes,
+    /// Download was cancelled via [`Download::cancel`].
+    Cancelled,
+    /// No progress received within the configured timeout duration.
+    NoProgressTimeout,
 }
 
 impl std::fmt::Display for DownloadError {
@@ -42,6 +51,8 @@ impl std::fmt::Display for DownloadError {
             Self::FileWriteError(e) => write!(f, "File write error: {}", e),
             Self::PathResolutionError(msg) => write!(f, "Path resolution error: {}", msg),
             Self::InvalidTokenBytes => write!(f, "Invalid token bytes received"),
+            Self::Cancelled => write!(f, "Download cancelled"),
+            Self::NoProgressTimeout => write!(f, "Download timed out (no progress)"),
         }
     }
 }
@@ -108,8 +119,10 @@ impl DownloadPeer {
         let stream = TcpStream::connect_timeout(&socket_address, Duration::from_secs(20))
             .map_err(DownloadError::ConnectionFailed)?;
 
+        // Use a short read timeout so the read loop can check cancel/progress-timeout flags
+        // between poll intervals rather than blocking for 30 s on a stalled peer.
         stream
-            .set_read_timeout(Some(Duration::from_secs(30)))
+            .set_read_timeout(Some(READ_CHECK_INTERVAL))
             .map_err(DownloadError::ConnectionFailed)?;
         stream
             .set_write_timeout(Some(Duration::from_secs(5)))
@@ -323,6 +336,7 @@ impl DownloadPeer {
         let mut total_bytes = initial_bytes;
         let mut chunk_counter = 0usize;
         let mut last_update_time = Instant::now();
+        let mut last_data_time = Instant::now();
         let mut read_buffer = [0u8; READ_BUFFER_SIZE];
 
         trace!("[download_peer:{}] reading stream data", username);
@@ -342,6 +356,13 @@ impl DownloadPeer {
                         .map_err(DownloadError::FileWriteError)?;
                     total_bytes += bytes_read;
                     chunk_counter += 1;
+                    last_data_time = Instant::now();
+
+                    // Check for manual cancellation after each chunk.
+                    if download.cancel.load(Ordering::Relaxed) {
+                        trace!("[download_peer:{}] cancelled by caller", username);
+                        return Err(DownloadError::Cancelled);
+                    }
 
                     if chunk_counter % PROGRESS_UPDATE_CHUNKS == 0 {
                         let elapsed = last_update_time.elapsed().as_secs_f64();
@@ -361,6 +382,31 @@ impl DownloadPeer {
                     if total_bytes >= download.size as usize {
                         break;
                     }
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock
+                    || e.kind() == io::ErrorKind::TimedOut =>
+                {
+                    // The 1-second read timeout fired; check flags before retrying.
+                    if download.cancel.load(Ordering::Relaxed) {
+                        trace!("[download_peer:{}] cancelled by caller (stalled)", username);
+                        return Err(DownloadError::Cancelled);
+                    }
+                    if let Some(timeout) = download.progress_timeout {
+                        if last_update_time.elapsed() >= timeout {
+                            trace!(
+                                "[download_peer:{}] no progress for {:?}, cancelling",
+                                username, timeout
+                            );
+                            return Err(DownloadError::NoProgressTimeout);
+                        }
+                    }
+                    if last_data_time.elapsed() >= STALL_TIMEOUT {
+                        return Err(DownloadError::StreamReadError(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "peer stopped sending data",
+                        )));
+                    }
+                    // Peer is briefly slow; keep waiting.
                 }
                 Err(e) => return Err(DownloadError::StreamReadError(e)),
             }

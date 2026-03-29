@@ -21,10 +21,11 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
 };
-use tokio::sync::mpsc::{self, UnboundedReceiver};
+use tokio::sync::mpsc;
 
 mod connected_worker;
 mod context;
+mod download_handle;
 mod inner;
 pub(super) mod operation;
 mod settings;
@@ -32,6 +33,7 @@ pub(super) mod state_monitor;
 
 use connected_worker::ConnectedWorker;
 pub use context::ClientContext;
+pub use download_handle::DownloadHandle;
 pub use inner::{ActiveConnection, ClientInner, ClientState, PendingDownload};
 pub use operation::ClientOperation;
 pub use settings::*;
@@ -350,7 +352,8 @@ impl Client {
         username: String,
         size: u64,
         download_directory: String,
-    ) -> Result<(Download, UnboundedReceiver<DownloadStatus>)> {
+        progress_timeout: Option<Duration>,
+    ) -> Result<(Download, DownloadHandle)> {
         let filename: SoulseekPath = filename.into();
         info!("[client] Downloading {} from {}", filename, username);
 
@@ -358,6 +361,7 @@ impl Client {
         let token = DownloadToken(u32::from_str_radix(&hash[0..5], 16)?);
 
         let (download_sender, download_receiver) = mpsc::unbounded_channel::<DownloadStatus>();
+        let cancel = Arc::new(AtomicBool::new(false));
 
         let pending = PendingDownload {
             filename: filename.clone(),
@@ -366,8 +370,11 @@ impl Client {
             download_directory,
             token,
             status_sender: download_sender,
+            cancel: cancel.clone(),
+            progress_timeout,
         };
         let download = pending.to_download();
+        let handle = DownloadHandle::new(download_receiver, cancel);
 
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
 
@@ -384,7 +391,7 @@ impl Client {
             guard.pending_downloads.push_back(pending);
         }
 
-        Ok((download, download_receiver))
+        Ok((download, handle))
     }
 }
 
@@ -409,6 +416,8 @@ mod tests {
             download_directory: "test".to_string(),
             status: DownloadStatus::Queued,
             sender: mpsc::unbounded_channel().0,
+            cancel: Arc::new(AtomicBool::new(false)),
+            progress_timeout: None,
         };
         context.add_download(download);
         assert!(context.get_download_by_token(token).is_some());

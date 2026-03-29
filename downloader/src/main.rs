@@ -147,12 +147,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             track_bar.set_message(attempt_label.clone());
             track_bar.set_position(0);
 
-            let (_dl, mut rx) = match client.download(result, &download_dir).await {
+            let (_dl, mut handle) = match client.download(result, &download_dir, None).await {
                 Ok(pair) => pair,
                 Err(_) => continue,
             };
 
-            while let Some(status) = rx.recv().await {
+            while let Some(status) = handle.recv().await {
                 match status {
                     DownloadStatus::Queued => {
                         track_bar.set_message(format!("{attempt_label}  [queued]"));
@@ -171,7 +171,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         track_bar.finish_with_message(format!("✓ {label}"));
                         break 'candidates;
                     }
-                    DownloadStatus::Failed | DownloadStatus::TimedOut => {
+                    DownloadStatus::Failed
+                    | DownloadStatus::TimedOut
+                    | DownloadStatus::Cancelled => {
                         break;
                     }
                 }

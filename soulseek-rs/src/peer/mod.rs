@@ -1,11 +1,11 @@
-mod download_peer;
+pub mod download_peer;
 pub mod listen;
 
 // Export actor types
 pub use crate::actor::peer_actor::{PeerActor, PeerMessage};
 pub use crate::actor::peer_registry::PeerRegistry;
 
-pub use download_peer::DownloadPeer;
+pub use download_peer::{DownloadError, DownloadPeer};
 
 use crate::message::Message;
 use crate::token::PierceToken;

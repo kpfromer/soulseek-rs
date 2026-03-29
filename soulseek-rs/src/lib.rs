@@ -22,7 +22,7 @@ pub mod prelude {
 
 // Re-export commonly used types
 pub use actor::server_actor::PeerAddress;
-pub use client::{Client, ClientSettings};
+pub use client::{Client, ClientSettings, DownloadHandle};
 pub use error::{Result, SoulseekRs};
 pub use path::SoulseekPath;
 pub use token::{DownloadToken, PierceToken, SearchToken};
