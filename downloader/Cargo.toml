@@ -1,0 +1,17 @@
+[package]
+name = "downloader"
+version.workspace = true
+edition.workspace = true
+description = "Batch-download tracks from a CSV via Soulseek"
+
+[[bin]]
+name = "downloader"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive", "env"] }
+csv = "1"
+indicatif = "0.17"
+serde = { version = "1", features = ["derive"] }
+song-rs = { path = "../song-rs" }
+tokio = { version = "1", features = ["full"] }

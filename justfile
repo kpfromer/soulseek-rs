@@ -24,3 +24,8 @@ run:
 # Requires ACOUSTID_API_KEY env var (or pass via --acoustid-api-key)
 lookup file:
   cargo run -p musicbrainz --example lookup -- "{{file}}"
+
+# Usage: just download tracks.csv
+# Requires SOULSEEK_USERNAME and SOULSEEK_PASSWORD env vars (or .env file)
+download csv:
+  cargo run -p downloader --release -- "{{csv}}"

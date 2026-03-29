@@ -71,15 +71,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (file, _) = &files[idx];
 
     // Download
-    let (_dl, mut rx) = client.download(
+    let (_dl, mut handle) = client.download(
         file.name.clone(),
         file.username.clone(),
         file.size,
         "./downloads".to_string(),
+        None,
     )?;
 
     println!("Downloading...");
-    while let Some(status) = rx.recv().await {
+    while let Some(status) = handle.recv().await {
         match status {
             DownloadStatus::Queued => println!("Queued..."),
             DownloadStatus::InProgress {
@@ -102,6 +103,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             DownloadStatus::TimedOut => {
                 eprintln!("\nDownload timed out.");
+                break;
+            }
+            DownloadStatus::Cancelled => {
+                eprintln!("\nDownload cancelled.");
                 break;
             }
         }

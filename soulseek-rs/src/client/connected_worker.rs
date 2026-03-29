@@ -80,6 +80,8 @@ impl ConnectedWorker {
                         info!("Successfully downloaded to {}", path);
                         DownloadStatus::Completed
                     }
+                    Err(crate::error::SoulseekRs::DownloadCancelled) => DownloadStatus::Cancelled,
+                    Err(crate::error::SoulseekRs::DownloadTimedOut) => DownloadStatus::TimedOut,
                     Err(ref e) => {
                         error!("Download failed: {}", e);
                         DownloadStatus::Failed
@@ -184,11 +186,25 @@ impl ConnectedWorker {
                                 .download_direct(download.clone(), None)
                                 .map(|(_, path)| path)
                                 .map_err(|e| {
-                                    error!(
-                                        "Failed to download '{}' from {}:{} (token: {}): {}",
-                                        download.filename, peer.host, peer.port, download.token, e
-                                    );
-                                    crate::error::SoulseekRs::InvalidMessage(e.to_string())
+                                    use crate::peer::download_peer::DownloadError;
+                                    match e {
+                                        DownloadError::Cancelled => {
+                                            crate::error::SoulseekRs::DownloadCancelled
+                                        }
+                                        DownloadError::NoProgressTimeout => {
+                                            crate::error::SoulseekRs::DownloadTimedOut
+                                        }
+                                        other => {
+                                            error!(
+                                                "Failed to download '{}' from {}:{} (token: {}): {}",
+                                                download.filename, peer.host, peer.port,
+                                                download.token, other
+                                            );
+                                            crate::error::SoulseekRs::InvalidMessage(
+                                                other.to_string(),
+                                            )
+                                        }
+                                    }
                                 });
                             let _ = op_tx.send(ClientOperation::DownloadCompleted(token, result));
                         });
@@ -301,6 +317,8 @@ impl ConnectedWorker {
                         download_directory: download.download_directory,
                         status: download.status.clone(),
                         sender: download.sender.clone(),
+                        cancel: download.cancel.clone(),
+                        progress_timeout: download.progress_timeout,
                     });
                     context.remove_download(old_token);
                 }
@@ -427,6 +445,13 @@ impl ConnectedWorker {
                     match result {
                         Ok((token, path)) => {
                             let _ = op_tx.send(ClientOperation::DownloadCompleted(token, Ok(path)));
+                        }
+                        Err(crate::peer::download_peer::DownloadError::Cancelled) => {
+                            // Token isn't available pre-handshake; pierce path drops silently.
+                            trace!("[worker] pierced download cancelled");
+                        }
+                        Err(crate::peer::download_peer::DownloadError::NoProgressTimeout) => {
+                            trace!("[worker] pierced download timed out");
                         }
                         Err(e) => {
                             trace!("[worker] failed to download: {}", e);

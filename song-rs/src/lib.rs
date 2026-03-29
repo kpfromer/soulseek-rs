@@ -10,8 +10,8 @@ pub use error::Error;
 pub use types::{FileType, SongQuery, SongResult, WantedFileTypes};
 
 pub use soulseek_rs::types::{Download, DownloadStatus};
+pub use soulseek_rs::DownloadHandle;
 use std::time::Duration;
-use tokio::sync::mpsc::UnboundedReceiver;
 
 #[derive(Clone)]
 pub struct Client {
@@ -55,12 +55,16 @@ impl Client {
     }
 
     /// Initiate a download for a specific result.
+    ///
+    /// Pass `progress_timeout` to automatically cancel the download if no progress
+    /// is received within that duration.
     pub async fn download(
         &self,
         result: &SongResult,
         // TODO: use a path instead of a string
         download_dir: impl Into<String>,
-    ) -> Result<(Download, UnboundedReceiver<DownloadStatus>), Error> {
+        progress_timeout: Option<Duration>,
+    ) -> Result<(Download, DownloadHandle), Error> {
         info!(
             "download: filename={}, username={}",
             result.filename.as_str(),
@@ -68,17 +72,21 @@ impl Client {
         );
         self.connect().await?;
 
-        let (dl, rx) = self.inner.download(
+        let (dl, handle) = self.inner.download(
             result.filename.clone(),
             result.username.clone(),
             result.size,
             // TODO: use a path instead of a string
             download_dir.into(),
+            progress_timeout,
         )?;
-        Ok((dl, rx))
+        Ok((dl, handle))
     }
 
     /// Search and immediately download the best matching result.
+    ///
+    /// Pass `progress_timeout` to automatically cancel if no progress is received
+    /// within that duration.
     pub async fn download_best(
         &self,
         query: &SongQuery,
@@ -86,7 +94,8 @@ impl Client {
         // TODO: use a path instead of a string
         download_dir: impl Into<String>,
         wanted_file_types: &WantedFileTypes,
-    ) -> Result<(SongResult, Download, UnboundedReceiver<DownloadStatus>), Error> {
+        progress_timeout: Option<Duration>,
+    ) -> Result<(SongResult, Download, DownloadHandle), Error> {
         self.connect().await?;
 
         let results = self.search(query, timeout, wanted_file_types).await?;
@@ -96,7 +105,7 @@ impl Client {
             best.filename.as_str(),
             best.score
         );
-        let (dl, rx) = self.download(&best, download_dir).await?;
-        Ok((best, dl, rx))
+        let (dl, handle) = self.download(&best, download_dir, progress_timeout).await?;
+        Ok((best, dl, handle))
     }
 }

@@ -18,6 +18,10 @@ pub enum SoulseekRs {
     NotConnected,
     /// Compression/decompression error
     CompressionError(String),
+    /// Download was cancelled by the caller
+    DownloadCancelled,
+    /// Download timed out due to no progress
+    DownloadTimedOut,
 }
 
 impl fmt::Display for SoulseekRs {
@@ -39,15 +43,18 @@ impl fmt::Display for SoulseekRs {
             SoulseekRs::CompressionError(msg) => {
                 write!(f, "Compression error: {}", msg)
             }
+            SoulseekRs::DownloadCancelled => write!(f, "Download cancelled"),
+            SoulseekRs::DownloadTimedOut => write!(f, "Download timed out (no progress)"),
         }
     }
 }
 
 impl Error for SoulseekRs {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            SoulseekRs::NetworkError(err) => Some(err),
-            _ => None,
+        if let SoulseekRs::NetworkError(err) = self {
+            Some(err)
+        } else {
+            None
         }
     }
 }

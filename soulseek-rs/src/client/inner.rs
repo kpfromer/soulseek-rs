@@ -1,4 +1,6 @@
 use std::collections::VecDeque;
+use std::sync::atomic::AtomicBool;
+use std::time::Duration;
 
 use crate::DownloadStatus;
 use crate::actor::server_actor::ServerMessage;
@@ -27,6 +29,10 @@ pub struct PendingDownload {
     pub download_directory: String,
     pub token: DownloadToken,
     pub status_sender: UnboundedSender<DownloadStatus>,
+    /// Shared cancel flag — set to `true` by the caller to request cancellation.
+    pub cancel: Arc<AtomicBool>,
+    /// Cancel the download if no progress update arrives within this duration.
+    pub progress_timeout: Option<Duration>,
 }
 
 impl PendingDownload {
@@ -39,6 +45,8 @@ impl PendingDownload {
             download_directory: self.download_directory.clone(),
             status: DownloadStatus::Queued,
             sender: self.status_sender.clone(),
+            cancel: self.cancel.clone(),
+            progress_timeout: self.progress_timeout,
         }
     }
 }

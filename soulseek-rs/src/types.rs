@@ -1,4 +1,7 @@
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::time::Duration;
 
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -120,13 +123,20 @@ pub struct Download {
     pub download_directory: String,
     pub status: DownloadStatus,
     pub sender: UnboundedSender<DownloadStatus>,
+    /// Shared cancel flag — set to `true` to request cancellation.
+    pub cancel: Arc<AtomicBool>,
+    /// If set, cancel the download if no progress update arrives within this duration.
+    pub progress_timeout: Option<Duration>,
 }
 
 impl Download {
     pub fn is_finished(&self) -> bool {
         matches!(
             self.status,
-            DownloadStatus::Completed | DownloadStatus::Failed | DownloadStatus::TimedOut
+            DownloadStatus::Completed
+                | DownloadStatus::Failed
+                | DownloadStatus::TimedOut
+                | DownloadStatus::Cancelled
         )
     }
 
@@ -162,6 +172,7 @@ pub enum DownloadStatus {
     Completed,
     Failed,
     TimedOut,
+    Cancelled,
 }
 impl Transfer {
     pub fn new_from_message(message: &mut Message) -> Self {

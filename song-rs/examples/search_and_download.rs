@@ -114,7 +114,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(Ok)
         .unwrap_or_else(|| prompt("Password: "))?;
 
-    let mut client = Client::new(username, password);
+    let client = Client::new(username, password);
 
     // --- Song query ---
     let title = args
@@ -145,16 +145,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         query.title, query.artist, args.timeout
     );
     if args.download_best {
-        let (result, _dl, mut rx) = client
+        let (result, _dl, mut handle) = client
             .download_best(
                 &query,
                 Duration::from_secs(args.timeout),
                 args.download_dir.to_string_lossy().to_string(),
                 &WantedFileTypes::from(args.file_type),
+                Some(Duration::from_secs(10)),
             )
             .await?;
 
-        while let Some(status) = rx.recv().await {
+        while let Some(status) = handle.recv().await {
             match status {
                 DownloadStatus::Queued => println!("  Queued..."),
                 DownloadStatus::InProgress {
@@ -177,6 +178,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 DownloadStatus::TimedOut => {
                     eprintln!("\n  Download timed out.");
+                    break;
+                }
+                DownloadStatus::Cancelled => {
+                    eprintln!("\n  Download cancelled.");
                     break;
                 }
             }
@@ -223,11 +228,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // --- Download ---
     println!("\nDownloading \"{}\"...", result.filename.filename());
-    let (_dl, mut rx) = client
-        .download(result, args.download_dir.to_string_lossy().to_string())
+    let (_dl, mut handle) = client
+        .download(
+            result,
+            args.download_dir.to_string_lossy().to_string(),
+            None,
+        )
         .await?;
 
-    while let Some(status) = rx.recv().await {
+    while let Some(status) = handle.recv().await {
         match status {
             DownloadStatus::Queued => println!("  Queued..."),
             DownloadStatus::InProgress {
@@ -250,6 +259,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             DownloadStatus::TimedOut => {
                 eprintln!("\n  Download timed out.");
+                break;
+            }
+            DownloadStatus::Cancelled => {
+                eprintln!("\n  Download cancelled.");
                 break;
             }
         }
