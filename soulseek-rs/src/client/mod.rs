@@ -1,4 +1,4 @@
-use crate::actor::server_actor::{ServerActor, ServerMessage};
+use crate::actor::server_actor::{ServerActor, ServerCommand};
 use crate::path::SoulseekPath;
 use crate::search_rate_limiter::SlidingRateLimiter;
 use crate::token::{DownloadToken, SearchToken};
@@ -110,8 +110,13 @@ impl Client {
 
         // Build fully-initialized context before spawning anything.
         let context = {
-            let peer_registry =
-                PeerRegistry::new(actor_system.clone(), op_tx.clone(), username.clone());
+            let peer_registry = PeerRegistry::new(
+                actor_system.clone(),
+                op_tx.clone(),
+                username.clone(),
+                self.settings.shared_folders,
+                self.settings.shared_files,
+            );
             Arc::new(ClientContext::new(peer_registry))
         };
 
@@ -121,7 +126,20 @@ impl Client {
             guard.pending_downloads.drain(..).collect::<VecDeque<_>>()
         };
 
-        // Spawn ConnectedWorker FIRST so it is already consuming op_tx when ServerActor starts.
+        // Spawn ServerActor first so we have its handle for the worker.
+        let server_actor = ServerActor::new(
+            self.settings.server_address.clone(),
+            op_tx.clone(),
+            self.settings.listen_port,
+            self.settings.enable_listen,
+            self.settings.shared_folders,
+            self.settings.shared_files,
+            self.settings.tcp_keepalive_settings.clone(),
+            self.settings.reconnect_settings.clone(),
+        );
+        let server_handle = actor_system.spawn(server_actor);
+
+        // Spawn ConnectedWorker — receives server_handle for sending commands.
         let worker = ConnectedWorker {
             own_username: username.clone(),
             op_tx: op_tx.clone(),
@@ -129,7 +147,7 @@ impl Client {
             inner: self.inner.clone(),
             context: context.clone(),
             cancellation_token: cancellation_token.clone(),
-            server_sender: None,
+            server_handle: server_handle.clone(),
             logged_in: false,
             pending: pre_pending,
             max_concurrent,
@@ -138,20 +156,6 @@ impl Client {
             searches: HashMap::new(),
         };
         tokio::spawn(async move { worker.run().await });
-
-        // Spawn ServerActor — starts sending to op_tx; worker is already running.
-        let server_actor = ServerActor::new(
-            self.settings.server_address.clone(),
-            op_tx.clone(),
-            self.settings.listen_port,
-            self.settings.enable_listen,
-            self.settings.tcp_keepalive_settings.clone(),
-            self.settings.reconnect_settings.clone(),
-        );
-
-        let server_handle = actor_system.spawn_with_handle(server_actor, |actor, handle| {
-            actor.set_self_handle(handle);
-        });
 
         // Store active connection (after server handle exists).
         {
@@ -186,7 +190,7 @@ impl Client {
 
         // Send Login — queued by ServerActor until TCP is ready.
         let (login_tx, login_rx) = oneshot::channel();
-        let _ = server_handle.send(ServerMessage::Login {
+        let _ = server_handle.send(ServerCommand::Login {
             username: username.clone(),
             password: password.clone(),
             response: login_tx,
@@ -224,7 +228,7 @@ impl Client {
 
         // Register search in worker and send FileSearch to server
         let _ = op_tx.send(ClientOperation::InitiateSearch(token, query.to_string()));
-        let _ = server_handle.send(ServerMessage::FileSearch {
+        let _ = server_handle.send(ServerCommand::FileSearch {
             token,
             query: query.to_string(),
         });
@@ -310,7 +314,7 @@ mod tests {
         use crate::actor::ActorSystem;
         let actor_system = Arc::new(ActorSystem::new());
         let (op_tx, _) = mpsc::unbounded_channel();
-        let registry = PeerRegistry::new(actor_system, op_tx, "test".to_string());
+        let registry = PeerRegistry::new(actor_system, op_tx, "test".to_string(), 1, 499);
         let context = ClientContext::new(registry);
         // Just verify it constructs without panic
         drop(context);

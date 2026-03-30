@@ -1,21 +1,21 @@
 use crate::message::{Message, MessageHandler};
-use crate::peer::PeerMessage;
+use crate::peer::PeerSignal;
 use crate::types::SearchResult;
 use tokio::sync::mpsc::UnboundedSender;
 
 pub struct FileSearchResponse;
-impl MessageHandler<PeerMessage> for FileSearchResponse {
+impl MessageHandler<PeerSignal> for FileSearchResponse {
     fn get_code(&self) -> u32 {
         9
     }
-    fn handle(&self, message: &mut Message, sender: UnboundedSender<PeerMessage>) {
+    fn handle(&self, message: &mut Message, sender: UnboundedSender<PeerSignal>) {
         let file_search = match SearchResult::new_from_message(message) {
             Ok(result) => result,
             Err(_) => return, // Skip malformed search results
         };
 
         sender
-            .send(PeerMessage::FileSearchResult(file_search))
+            .send(PeerSignal::FileSearchResult(file_search))
             .unwrap();
     }
 }

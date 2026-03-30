@@ -9,9 +9,10 @@ use tokio::sync::oneshot;
 
 use crate::client::{ClientContext, ClientOperation};
 use crate::message::{Message, MessageReader};
-use crate::peer::{ConnectionType, DownloadPeer, Peer};
+use crate::peer::download_peer::spawn_direct_download;
+use crate::peer::{ConnectionType, Peer};
 use crate::token::DownloadToken;
-use crate::{DownloadStatus, debug, error, info, trace};
+use crate::{debug, error, info, trace};
 
 const PEER_INIT_MESSAGE_CODE: u8 = 1;
 const PIERCE_FIREWALL_MESSAGE_CODE: u8 = 0;
@@ -153,37 +154,16 @@ async fn handle_incoming_connection(stream: TcpStream, context: ConnectionContex
             return;
         };
 
-        // Convert tokio TcpStream to std for DownloadPeer (which still uses blocking I/O)
         let std_stream = stream.into_std().unwrap();
-        let client_sender = context.client_sender.clone();
-        let own_username = context.own_username.clone();
-
-        tokio::task::spawn_blocking(move || {
-            let download_peer = DownloadPeer::new(
-                download.username.clone(),
-                peer_ip.clone(),
-                peer_port.into(),
-                token.0,
-                own_username,
-            );
-
-            match download_peer.download_direct(download, Some(std_stream)) {
-                Ok((dl, filename)) => {
-                    let _ = dl.sender.send(DownloadStatus::Completed);
-                    let _ = client_sender.send(ClientOperation::DownloadCompleted(dl.token, Ok(filename)));
-                }
-                Err(e) => {
-                    error!(
-                        "Failed to download file via PierceFireWall (token: {}) - Error: {}",
-                        token, e
-                    );
-                    let _ = client_sender.send(ClientOperation::DownloadCompleted(
-                        token,
-                        Err(crate::error::SoulseekRs::InvalidMessage(e.to_string())),
-                    ));
-                }
-            }
-        });
+        spawn_direct_download(
+            download,
+            peer_ip,
+            peer_port.into(),
+            token.0,
+            context.own_username.clone(),
+            Some(std_stream),
+            context.client_sender.clone(),
+        );
         return;
     }
 
@@ -240,42 +220,15 @@ async fn handle_incoming_connection(stream: TcpStream, context: ConnectionContex
             };
 
             let std_stream = stream.into_std().unwrap();
-            let client_sender = context.client_sender.clone();
-            let own_username = context.own_username.clone();
-            let peer_host = peer.host.clone();
-            let peer_port_val = peer.port;
-            let connection_token = init_data.token;
-            let peer_username = init_data.username.clone();
-
-            tokio::task::spawn_blocking(move || {
-                trace!(
-                    "[listener:{}:{}] handling file connection in blocking task",
-                    peer_ip, peer_port
-                );
-                let download_peer = DownloadPeer::new(
-                    peer_username.clone(),
-                    peer_host.clone(),
-                    peer_port_val,
-                    connection_token,
-                    own_username,
-                );
-                match download_peer.download_direct(download, Some(std_stream)) {
-                    Ok((dl, filename)) => {
-                        let _ = dl.sender.send(DownloadStatus::Completed);
-                        let _ = client_sender.send(ClientOperation::DownloadCompleted(dl.token, Ok(filename)));
-                    }
-                    Err(e) => {
-                        error!(
-                            "Failed to download file from {}:{} (token: {}) - Error: {}",
-                            peer_host, peer_port_val, download_token, e
-                        );
-                        let _ = client_sender.send(ClientOperation::DownloadCompleted(
-                            download_token,
-                            Err(crate::error::SoulseekRs::InvalidMessage(e.to_string())),
-                        ));
-                    }
-                }
-            });
+            spawn_direct_download(
+                download,
+                peer.host,
+                peer.port,
+                init_data.token,
+                context.own_username.clone(),
+                Some(std_stream),
+                context.client_sender.clone(),
+            );
         }
         ConnectionType::D => {
             debug!(

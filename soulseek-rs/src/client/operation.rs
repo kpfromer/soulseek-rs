@@ -1,7 +1,5 @@
-use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 
-use crate::actor::server_actor::ServerMessage;
 use crate::client::inner::PendingDownload;
 use crate::path::SoulseekPath;
 use crate::token::{DownloadToken, SearchToken};
@@ -28,7 +26,6 @@ pub enum ClientOperation {
         obfuscated_port: u16,
     },
     UploadFailed(String, SoulseekPath),
-    SetServerSender(UnboundedSender<ServerMessage>),
     /// Server TCP connection was lost; reconnect will be handled by ServerActor.
     ServerDisconnected,
     /// (Re)login confirmed; replay pending downloads.

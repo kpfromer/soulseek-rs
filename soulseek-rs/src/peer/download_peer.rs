@@ -7,9 +7,13 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
+use tokio::sync::mpsc::UnboundedSender;
+
+use crate::client::ClientOperation;
+use crate::error::SoulseekRs;
 use crate::message::server::MessageFactory;
 use crate::token::DownloadToken;
-use crate::trace;
+use crate::{error, trace};
 use crate::types::{Download, DownloadStatus};
 
 const START_DOWNLOAD: [u8; 8] = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
@@ -36,6 +40,46 @@ pub enum DownloadError {
     Cancelled,
     /// No progress received within the configured timeout duration.
     NoProgressTimeout,
+}
+
+impl From<DownloadError> for SoulseekRs {
+    fn from(e: DownloadError) -> Self {
+        match e {
+            DownloadError::Cancelled => SoulseekRs::DownloadCancelled,
+            DownloadError::NoProgressTimeout => SoulseekRs::DownloadTimedOut,
+            other => SoulseekRs::InvalidMessage(other.to_string()),
+        }
+    }
+}
+
+/// Spawns a blocking task that runs a direct download and reports the result
+/// back to the worker via [`ClientOperation::DownloadCompleted`].
+///
+/// Use this for all `download_direct` paths (outbound and inbound) so error
+/// mapping and the send pattern stay in one place.
+pub fn spawn_direct_download(
+    download: Download,
+    host: String,
+    port: u32,
+    peer_token: u32,
+    own_username: String,
+    stream: Option<TcpStream>,
+    op_tx: UnboundedSender<ClientOperation>,
+) {
+    let token = download.token;
+    let peer = DownloadPeer::new(download.username.clone(), host.clone(), port, peer_token, own_username);
+    tokio::task::spawn_blocking(move || {
+        let result = peer
+            .download_direct(download, stream)
+            .map(|(_, path)| path)
+            .map_err(|e| {
+                if !matches!(e, DownloadError::Cancelled | DownloadError::NoProgressTimeout) {
+                    error!("Failed to download from {}:{} (token: {}): {}", host, port, token, e);
+                }
+                SoulseekRs::from(e)
+            });
+        let _ = op_tx.send(ClientOperation::DownloadCompleted(token, result));
+    });
 }
 
 impl std::fmt::Display for DownloadError {

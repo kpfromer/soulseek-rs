@@ -3,7 +3,7 @@ use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use crate::DownloadStatus;
-use crate::actor::server_actor::ServerMessage;
+use crate::actor::server_actor::ServerCommand;
 use crate::actor::{ActorHandle, ActorSystem};
 use crate::client::ClientOperation;
 use crate::path::SoulseekPath;
@@ -52,7 +52,7 @@ impl PendingDownload {
 /// Holds all live-connection resources. Created on connect, persists across disconnects
 /// (ServerActor handles auto-reconnect). Only cleared when a new connect() is initiated.
 pub struct ActiveConnection {
-    pub server_handle: ActorHandle<ServerMessage>,
+    pub server_handle: ActorHandle<ServerCommand>,
     /// Sender to the ConnectedWorker operations channel.
     pub op_tx: UnboundedSender<ClientOperation>,
     /// Actor system — used for shutdown.
