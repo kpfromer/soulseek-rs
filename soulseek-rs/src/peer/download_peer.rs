@@ -231,7 +231,13 @@ impl DownloadPeer {
         );
 
         let mut stream = match stream {
-            Some(s) => s,
+            Some(s) => {
+                s.set_nonblocking(false).map_err(DownloadError::ConnectionFailed)?;
+                s.set_read_timeout(Some(READ_CHECK_INTERVAL)).map_err(DownloadError::ConnectionFailed)?;
+                s.set_write_timeout(Some(Duration::from_secs(5))).map_err(DownloadError::ConnectionFailed)?;
+                s.set_nodelay(true).map_err(DownloadError::ConnectionFailed)?;
+                s
+            }
             None => self.establish_connection()?,
         };
 
@@ -282,7 +288,13 @@ impl DownloadPeer {
         );
 
         let mut stream = match stream {
-            Some(s) => s,
+            Some(s) => {
+                s.set_nonblocking(false).map_err(|e| (None, DownloadError::ConnectionFailed(e)))?;
+                s.set_read_timeout(Some(READ_CHECK_INTERVAL)).map_err(|e| (None, DownloadError::ConnectionFailed(e)))?;
+                s.set_write_timeout(Some(Duration::from_secs(5))).map_err(|e| (None, DownloadError::ConnectionFailed(e)))?;
+                s.set_nodelay(true).map_err(|e| (None, DownloadError::ConnectionFailed(e)))?;
+                s
+            }
             None => self.establish_connection().map_err(|e| (None, e))?,
         };
 

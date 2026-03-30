@@ -104,6 +104,8 @@ impl ConnectedWorker {
             ClientOperation::RequestDownload(pd) => {
                 // Insert immediately so it's visible to queries even while queued.
                 self.downloads.insert(pd.token, pd.to_download());
+                // Notify caller immediately that the download was accepted.
+                let _ = pd.status_sender.send(DownloadStatus::Queued);
                 if self.logged_in && self.max_concurrent.is_none_or(|max| (self.active_slots.len() as u32) < max) {
                     self.try_initiate(pd);
                 } else {
@@ -274,6 +276,17 @@ impl ConnectedWorker {
                         .map(|s| s.results.clone())
                         .unwrap_or_default(),
                 );
+            }
+            ClientOperation::CancelDownload(token) => {
+                // Remove from pending queue (not yet started).
+                self.pending.retain(|pd| pd.token != token);
+                // Remove from active downloads; notify caller and free the slot.
+                if let Some(download) = self.downloads.remove(&token) {
+                    let _ = download.sender.send(DownloadStatus::Cancelled);
+                    if self.active_slots.remove(&token).is_some() {
+                        self.try_dequeue_next();
+                    }
+                }
             }
         }
     }

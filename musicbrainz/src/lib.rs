@@ -24,6 +24,7 @@ pub struct TrackMetadata {
     pub track_number: i32,
     pub duration: Duration,
     pub track_musicbrainz_id: Option<String>,
+    pub release_mbid: String,
     pub album_title: String,
     pub album_musicbrainz_id: Option<String>,
     pub album_year: Option<i32>,
@@ -116,11 +117,10 @@ pub async fn lookup_track(path: &Path, acoustid_api_key: &str) -> Result<TrackMe
     let album_musicbrainz_id = release.release_group.as_ref().map(|rg| rg.id.clone());
 
     // Album year: parse "YYYY" or "YYYY-MM-DD"
-    let album_year = release.date.as_ref().and_then(|d| {
-        d.0.split('-')
-            .next()
-            .and_then(|y| y.parse::<i32>().ok())
-    });
+    let album_year = release
+        .date
+        .as_ref()
+        .and_then(|d| d.0.split('-').next().and_then(|y| y.parse::<i32>().ok()));
 
     // Track number: global position across discs
     let track_number = release
@@ -130,10 +130,11 @@ pub async fn lookup_track(path: &Path, acoustid_api_key: &str) -> Result<TrackMe
             let mut offset = 0u32;
             media.iter().find_map(|medium| {
                 let tracks = medium.tracks.as_deref().unwrap_or(&[]);
-                if let Some(track) = tracks
-                    .iter()
-                    .find(|t| t.recording.as_ref().is_some_and(|r| r.id == best_recording.id))
-                {
+                if let Some(track) = tracks.iter().find(|t| {
+                    t.recording
+                        .as_ref()
+                        .is_some_and(|r| r.id == best_recording.id)
+                }) {
                     Some((offset + track.position) as i32)
                 } else {
                     offset += tracks.len() as u32;
@@ -149,6 +150,7 @@ pub async fn lookup_track(path: &Path, acoustid_api_key: &str) -> Result<TrackMe
         track_number,
         duration: Duration::from_secs(duration_secs as u64),
         track_musicbrainz_id: Some(best_recording.id),
+        release_mbid: first_release.id.clone(),
         album_title,
         album_musicbrainz_id,
         album_year,

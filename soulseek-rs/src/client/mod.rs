@@ -289,9 +289,11 @@ impl Client {
             progress_timeout,
         };
         let download = pending.to_download();
-        let handle = DownloadHandle::new(download_receiver, cancel, progress_timeout, recv_timeout);
 
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+
+        let op_tx_opt = guard.active.as_ref().map(|a| a.op_tx.clone());
+        let handle = DownloadHandle::new(download_receiver, cancel, progress_timeout, recv_timeout, op_tx_opt, token);
 
         if let Some(ref active) = guard.active {
             // Active connection — worker handles insertion and routing.

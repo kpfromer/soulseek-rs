@@ -42,4 +42,6 @@ pub enum ClientOperation {
     QueryDownloads(oneshot::Sender<Vec<Download>>),
     /// Public API: query search results for a key.
     QuerySearchResults(String, oneshot::Sender<Vec<SearchResult>>),
+    /// Cancel a download by token; cleans up pending queue and active slots.
+    CancelDownload(DownloadToken),
 }
