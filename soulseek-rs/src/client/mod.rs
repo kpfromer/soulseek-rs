@@ -22,6 +22,7 @@ use tokio::sync::oneshot;
 mod connected_worker;
 mod context;
 mod download_handle;
+mod download_slot;
 mod inner;
 pub(super) mod operation;
 mod settings;
@@ -135,7 +136,7 @@ impl Client {
             logged_in: false,
             pending: pre_pending,
             max_concurrent,
-            active_downloads: 0,
+            active_slots: HashMap::new(),
             downloads: HashMap::new(),
             searches: HashMap::new(),
         };

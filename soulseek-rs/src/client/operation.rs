@@ -37,8 +37,6 @@ pub enum ClientOperation {
     DownloadCompleted(DownloadToken, Result<String, SoulseekRs>),
     /// Initiate or queue a download; routed by ConnectedWorker.
     RequestDownload(PendingDownload),
-    /// Pierce-firewall download failed before the download token was resolved; free the slot.
-    PierceFirewallPreTokenFailed,
     /// Register a search entry in the worker (sent before FileSearch).
     InitiateSearch(SearchToken, String),
     /// Listener queries worker for a download by token.

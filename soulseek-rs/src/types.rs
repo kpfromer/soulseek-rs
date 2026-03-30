@@ -115,18 +115,39 @@ pub struct Transfer {
     pub filename: SoulseekPath,
     pub size: u64,
 }
+/// Represents an active or completed download tracked by the worker.
+///
+/// Created from a [`PendingDownload`] when a slot becomes available. Lives in
+/// `ConnectedWorker::downloads` for the lifetime of the transfer.
+///
+/// [`PendingDownload`]: crate::client::inner::PendingDownload
 #[derive(Debug, Clone)]
 pub struct Download {
+    /// The Soulseek username of the peer providing the file.
     pub username: String,
+    /// The full Soulseek path of the file being downloaded.
     pub filename: SoulseekPath,
+    /// Unique token identifying this download. Initially assigned by us; may be
+    /// remapped when the peer sends a `TransferRequest` with a different token.
     pub token: DownloadToken,
+    /// Expected file size in bytes as reported by the peer.
     pub size: u64,
+    /// Local filesystem directory where the downloaded file will be written.
     pub download_directory: String,
+    /// Current lifecycle status; updated by the worker on each state transition.
     pub status: DownloadStatus,
+    /// Sender half of the progress channel. The worker sends [`DownloadStatus`]
+    /// updates here; the user receives them via [`DownloadHandle`].
+    ///
+    /// [`DownloadHandle`]: crate::client::download_handle::DownloadHandle
     pub sender: UnboundedSender<DownloadStatus>,
-    /// Shared cancel flag — set to `true` to request cancellation.
+    /// Shared cancel flag — set to `true` by [`DownloadHandle::cancel`] to request
+    /// cancellation. Checked periodically by the download task.
+    ///
+    /// [`DownloadHandle::cancel`]: crate::client::download_handle::DownloadHandle::cancel
     pub cancel: Arc<AtomicBool>,
-    /// If set, cancel the download if no progress update arrives within this duration.
+    /// If set, the download is cancelled when no progress update arrives within
+    /// this duration. Used to detect stalled transfers.
     pub progress_timeout: Option<Duration>,
 }
 

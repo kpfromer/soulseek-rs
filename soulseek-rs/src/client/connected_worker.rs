@@ -6,6 +6,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
 
+use super::download_slot::DownloadSlot;
 use super::state_monitor::WorkerEvent;
 use crate::actor::server_actor::ServerMessage;
 use crate::client::inner::PendingDownload;
@@ -34,7 +35,9 @@ pub struct ConnectedWorker {
     pub logged_in: bool,
     pub pending: VecDeque<PendingDownload>,
     pub max_concurrent: Option<u32>,
-    pub active_downloads: u32,
+    /// Holds one [`DownloadSlot`] per in-flight download. `active_slots.len()` is the active count.
+    /// Removing an entry drops the slot, freeing the concurrency slot automatically.
+    pub active_slots: HashMap<DownloadToken, DownloadSlot>,
     /// All known downloads (queued or in-flight).
     pub downloads: HashMap<DownloadToken, Download>,
     /// All active searches keyed by token.
@@ -96,13 +99,13 @@ impl ConnectedWorker {
                 if let Some(download) = self.downloads.get_mut(&token) {
                     download.status = status;
                 }
-                self.active_downloads = self.active_downloads.saturating_sub(1);
+                self.active_slots.remove(&token);
                 self.try_dequeue_next();
             }
             ClientOperation::RequestDownload(pd) => {
                 // Insert immediately so it's visible to queries even while queued.
                 self.downloads.insert(pd.token, pd.to_download());
-                if self.logged_in && self.max_concurrent.is_none_or(|max| self.active_downloads < max) {
+                if self.logged_in && self.max_concurrent.is_none_or(|max| (self.active_slots.len() as u32) < max) {
                     self.try_initiate(pd);
                 } else {
                     self.pending.push_back(pd);
@@ -311,10 +314,6 @@ impl ConnectedWorker {
             ClientOperation::UploadFailed(username, filename) => {
                 self.process_failed_uploads(&username, Some(&filename));
             }
-            ClientOperation::PierceFirewallPreTokenFailed => {
-                self.active_downloads = self.active_downloads.saturating_sub(1);
-                self.try_dequeue_next();
-            }
             ClientOperation::SetServerSender(sender) => {
                 self.server_sender = Some(sender);
                 debug!("[worker] Server sender initialized");
@@ -341,18 +340,18 @@ impl ConnectedWorker {
     }
 
     /// Initiate a download: ensure it's in the downloads map, queue upload with peer registry,
-    /// and increment active_downloads counter.
+    /// and acquire a concurrency slot.
     fn try_initiate(&mut self, pd: PendingDownload) {
         // Insert/update so pre-pending items are also visible.
         self.downloads.insert(pd.token, pd.to_download());
         let _ = self.context.peer_registry.queue_upload(&pd.username, pd.filename.clone());
-        self.active_downloads += 1;
+        self.active_slots.insert(pd.token, DownloadSlot);
     }
 
     /// Drain pending queue up to the concurrency limit.
     fn drain_pending_queue(&mut self) {
         loop {
-            if self.max_concurrent.is_some_and(|max| self.active_downloads >= max) {
+            if self.max_concurrent.is_some_and(|max| (self.active_slots.len() as u32) >= max) {
                 break;
             }
             match self.pending.pop_front() {
@@ -367,7 +366,7 @@ impl ConnectedWorker {
         if !self.logged_in {
             return;
         }
-        if self.max_concurrent.is_some_and(|max| self.active_downloads >= max) {
+        if self.max_concurrent.is_some_and(|max| (self.active_slots.len() as u32) >= max) {
             return;
         }
         if let Some(pd) = self.pending.pop_front() {
@@ -385,12 +384,12 @@ impl ConnectedWorker {
                 d.token
             })
             .collect();
-        let count = failed_tokens.len();
+        let any_failed = !failed_tokens.is_empty();
         for token in failed_tokens {
             self.downloads.remove(&token);
+            self.active_slots.remove(&token); // slot drops → counter decremented
         }
-        self.active_downloads = self.active_downloads.saturating_sub(count as u32);
-        if count > 0 {
+        if any_failed {
             self.try_dequeue_next();
         }
     }
@@ -427,6 +426,12 @@ impl ConnectedWorker {
                     "[worker] downloading from: {}, {:?}",
                     peer.username, peer.token
                 );
+                // Capture the most likely token for this peer so we can report failure
+                // even before the wire token is resolved (pre-token failure path).
+                let initiating_token = downloads
+                    .values()
+                    .find(|d| d.username == peer.username)
+                    .map(|d| d.token);
                 let download_peer = DownloadPeer::new(
                     peer.username,
                     peer.host,
@@ -471,7 +476,14 @@ impl ConnectedWorker {
                         }
                         Err((None, e)) => {
                             warn!("[worker] pierce-firewall pre-token failure: {}", e);
-                            let _ = op_tx.send(ClientOperation::PierceFirewallPreTokenFailed);
+                            // Token was never resolved from the wire; use the initiating token
+                            // to release the slot. If lookup failed, the slot leaks (rare).
+                            if let Some(token) = initiating_token {
+                                let _ = op_tx.send(ClientOperation::DownloadCompleted(
+                                    token,
+                                    Err(crate::error::SoulseekRs::InvalidMessage(e.to_string())),
+                                ));
+                            }
                         }
                     }
                 });
