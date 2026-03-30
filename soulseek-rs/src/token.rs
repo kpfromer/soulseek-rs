@@ -33,3 +33,11 @@ macro_rules! impl_token {
 impl_token!(DownloadToken);
 impl_token!(SearchToken);
 impl_token!(PierceToken);
+
+/// Token assigned by the remote peer in a `TransferRequest` message and sent
+/// over the wire for F-type / pierce-firewall connections.
+/// Distinct from [`DownloadToken`], which is our internal stable key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PeerTransferToken(pub u32);
+
+impl_token!(PeerTransferToken);

@@ -1,6 +1,6 @@
 use crate::actor::{Actor, ConnectionState};
 use crate::client::ClientOperation;
-use crate::token::{DownloadToken, PierceToken};
+use crate::token::{PeerTransferToken, PierceToken};
 use crate::dispatcher::MessageDispatcher;
 use crate::message::peer::{
     FileSearchResponse, GetShareFileList, PeerInit, PlaceInQueueResponse, TransferRequest,
@@ -33,7 +33,7 @@ pub(crate) enum PeerSignal {
     FileSearchResult(SearchResult),
     TransferRequest(Transfer),
     TransferResponse {
-        token: DownloadToken,
+        token: PeerTransferToken,
         allowed: bool,
         reason: Option<String>,
     },

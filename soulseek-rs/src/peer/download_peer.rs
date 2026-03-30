@@ -12,7 +12,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::client::ClientOperation;
 use crate::error::SoulseekRs;
 use crate::message::server::MessageFactory;
-use crate::token::DownloadToken;
+use crate::token::{DownloadToken, PeerTransferToken};
 use crate::{error, trace};
 use crate::types::{Download, DownloadStatus};
 
@@ -31,7 +31,7 @@ pub enum DownloadError {
     HandshakeFailed(io::Error),
     StreamReadError(io::Error),
     StreamWriteError(io::Error),
-    TokenNotFound(DownloadToken),
+    TokenNotFound(PeerTransferToken),
     DownloadInfoMissing,
     FileWriteError(io::Error),
     PathResolutionError(String),
@@ -268,13 +268,13 @@ impl DownloadPeer {
     /// calls `resolve_download` to look up the corresponding `Download`,
     /// then streams data to disk.
     ///
-    /// On error, returns `(Option<DownloadToken>, DownloadError)` where the token is `Some` if it
+    /// On error, returns `(Option<PeerTransferToken>, DownloadError)` where the token is `Some` if it
     /// was resolved before the failure, or `None` if the failure occurred during the handshake.
     pub fn download_pierced(
         self,
-        resolve_download: impl Fn(DownloadToken) -> Option<Download>,
+        resolve_download: impl Fn(PeerTransferToken) -> Option<Download>,
         stream: Option<TcpStream>,
-    ) -> Result<(Download, String), (Option<DownloadToken>, DownloadError)> {
+    ) -> Result<(Download, String), (Option<PeerTransferToken>, DownloadError)> {
         trace!(
             "[download_peer:{}] download_pierced, stream present: {}",
             self.username,
@@ -308,7 +308,7 @@ impl DownloadPeer {
             return Err((None, DownloadError::InvalidTokenBytes));
         }
 
-        let token = DownloadToken(u32::from_le_bytes(
+        let token = PeerTransferToken(u32::from_le_bytes(
             first_buf[..4]
                 .try_into()
                 .map_err(|_| (None, DownloadError::InvalidTokenBytes))?,

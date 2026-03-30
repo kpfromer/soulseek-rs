@@ -11,7 +11,7 @@ use crate::client::{ClientContext, ClientOperation};
 use crate::message::{Message, MessageReader};
 use crate::peer::download_peer::spawn_direct_download;
 use crate::peer::{ConnectionType, Peer};
-use crate::token::DownloadToken;
+use crate::token::PeerTransferToken;
 use crate::{debug, error, info, trace};
 
 const PEER_INIT_MESSAGE_CODE: u8 = 1;
@@ -52,7 +52,7 @@ async fn read_peer_init_message(
     }
 }
 
-fn parse_pierce_firewall_token(message: &mut Message) -> Option<DownloadToken> {
+fn parse_pierce_firewall_token(message: &mut Message) -> Option<PeerTransferToken> {
     message.set_pointer(4);
     let message_code = message.read_int8();
 
@@ -60,7 +60,7 @@ fn parse_pierce_firewall_token(message: &mut Message) -> Option<DownloadToken> {
         return None;
     }
 
-    Some(DownloadToken(message.read_int32()))
+    Some(PeerTransferToken(message.read_int32()))
 }
 
 fn parse_peer_init_message(mut message: Message) -> Option<PeerInitData> {
@@ -78,7 +78,7 @@ fn parse_peer_init_message(mut message: Message) -> Option<PeerInitData> {
     })
 }
 
-fn parse_token_from_buffer(buffer: &[u8], username: &str) -> Option<DownloadToken> {
+fn parse_token_from_buffer(buffer: &[u8], username: &str) -> Option<PeerTransferToken> {
     let token_bytes = buffer.get(0..4)?;
     let token = u32::from_le_bytes(token_bytes.try_into().unwrap_or_else(|_| {
         panic!(
@@ -86,7 +86,7 @@ fn parse_token_from_buffer(buffer: &[u8], username: &str) -> Option<DownloadToke
             username
         )
     }));
-    Some(DownloadToken(token))
+    Some(PeerTransferToken(token))
 }
 
 fn handle_peer_connection(

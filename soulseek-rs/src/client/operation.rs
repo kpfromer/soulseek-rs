@@ -2,7 +2,7 @@ use tokio::sync::oneshot;
 
 use crate::client::inner::PendingDownload;
 use crate::path::SoulseekPath;
-use crate::token::{DownloadToken, SearchToken};
+use crate::token::{DownloadToken, PeerTransferToken, SearchToken};
 use crate::{
     Transfer,
     error::SoulseekRs,
@@ -16,7 +16,7 @@ pub enum ClientOperation {
     SearchResult(SearchResult),
     PeerDisconnected(String, Option<SoulseekRs>),
     PierceFireWall(Peer),
-    DownloadFromPeer(DownloadToken, Peer, bool),
+    DownloadFromPeer(PeerTransferToken, Peer, bool),
     UpdateDownloadTokens(Transfer, String),
     GetPeerAddressResponse {
         username: String,
@@ -36,8 +36,8 @@ pub enum ClientOperation {
     RequestDownload(PendingDownload),
     /// Register a search entry in the worker (sent before FileSearch).
     InitiateSearch(SearchToken, String),
-    /// Listener queries worker for a download by token.
-    QueryDownloadByToken(DownloadToken, oneshot::Sender<Option<Download>>),
+    /// Listener queries worker for a download by peer token.
+    QueryDownloadByToken(PeerTransferToken, oneshot::Sender<Option<Download>>),
     /// Public API: query all downloads.
     QueryDownloads(oneshot::Sender<Vec<Download>>),
     /// Public API: query search results for a key.

@@ -39,6 +39,7 @@ impl PendingDownload {
             username: self.username.clone(),
             filename: self.filename.clone(),
             token: self.token,
+            peer_token: None,
             size: self.size,
             download_directory: self.download_directory.clone(),
             status: DownloadStatus::Queued,

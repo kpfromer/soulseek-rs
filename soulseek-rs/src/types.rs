@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::token::{DownloadToken, SearchToken};
+use crate::token::{DownloadToken, PeerTransferToken, SearchToken};
 use crate::{error::Result, message::Message, path::SoulseekPath, utils::zlib::deflate};
 
 #[derive(Debug, Clone, Default)]
@@ -111,7 +111,7 @@ impl SearchResult {
 #[allow(dead_code)]
 pub struct Transfer {
     pub direction: u32,
-    pub token: DownloadToken,
+    pub token: PeerTransferToken,
     pub filename: SoulseekPath,
     pub size: u64,
 }
@@ -130,6 +130,9 @@ pub struct Download {
     /// Unique token identifying this download. Initially assigned by us; may be
     /// remapped when the peer sends a `TransferRequest` with a different token.
     pub token: DownloadToken,
+    /// The peer's wire token, set when `TransferRequest` is received.
+    /// `None` until the uploader sends `TransferRequest`.
+    pub peer_token: Option<PeerTransferToken>,
     /// Expected file size in bytes as reported by the peer.
     pub size: u64,
     /// Local filesystem directory where the downloaded file will be written.
@@ -199,7 +202,7 @@ pub enum DownloadStatus {
 impl Transfer {
     pub fn new_from_message(message: &mut Message) -> Self {
         let direction = message.read_int32();
-        let token = DownloadToken(message.read_int32());
+        let token = PeerTransferToken(message.read_int32());
         let filename = SoulseekPath::from_wire(message.read_string());
         let size = message.read_int64();
 
