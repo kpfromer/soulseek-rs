@@ -229,7 +229,7 @@ impl Client {
         let token = SearchToken(u32::from_str_radix(&hash[0..5], 16)?);
 
         // Register search in worker and send FileSearch to server
-        let _ = op_tx.send(ClientOperation::InitiateSearch(query.to_string(), token));
+        let _ = op_tx.send(ClientOperation::InitiateSearch(token, query.to_string()));
         let _ = server_handle.send(ServerMessage::FileSearch {
             token,
             query: query.to_string(),

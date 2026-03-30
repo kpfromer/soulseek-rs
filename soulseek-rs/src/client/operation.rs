@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 
@@ -11,7 +9,7 @@ use crate::{
     Transfer,
     error::SoulseekRs,
     peer::{NewPeer, Peer},
-    types::{Download, Search, SearchResult},
+    types::{Download, SearchResult},
 };
 
 pub enum ClientOperation {
@@ -42,15 +40,11 @@ pub enum ClientOperation {
     /// Pierce-firewall download failed before the download token was resolved; free the slot.
     PierceFirewallPreTokenFailed,
     /// Register a search entry in the worker (sent before FileSearch).
-    InitiateSearch(String, SearchToken),
+    InitiateSearch(SearchToken, String),
     /// Listener queries worker for a download by token.
     QueryDownloadByToken(DownloadToken, oneshot::Sender<Option<Download>>),
     /// Public API: query all downloads.
     QueryDownloads(oneshot::Sender<Vec<Download>>),
     /// Public API: query search results for a key.
     QuerySearchResults(String, oneshot::Sender<Vec<SearchResult>>),
-    /// Public API: query result count for a search key.
-    QuerySearchResultsCount(String, oneshot::Sender<usize>),
-    /// Public API: query all searches.
-    QueryAllSearches(oneshot::Sender<HashMap<String, Search>>),
 }

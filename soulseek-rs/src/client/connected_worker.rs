@@ -11,7 +11,7 @@ use crate::actor::server_actor::ServerMessage;
 use crate::client::inner::PendingDownload;
 use crate::client::{ClientContext, ClientOperation};
 use crate::path::SoulseekPath;
-use crate::token::DownloadToken;
+use crate::token::{DownloadToken, SearchToken};
 use crate::types::DownloadStatus;
 use crate::types::{Download, Search};
 use crate::{debug, error, info, trace, warn};
@@ -37,8 +37,8 @@ pub struct ConnectedWorker {
     pub active_downloads: u32,
     /// All known downloads (queued or in-flight).
     pub downloads: HashMap<DownloadToken, Download>,
-    /// All active searches keyed by query string.
-    pub searches: HashMap<String, Search>,
+    /// All active searches keyed by token.
+    pub searches: HashMap<SearchToken, Search>,
 }
 
 impl ConnectedWorker {
@@ -119,12 +119,8 @@ impl ConnectedWorker {
             }
             ClientOperation::SearchResult(search_result) => {
                 trace!("[worker] SearchResult {:?}", search_result);
-                let result_token = search_result.token;
-                for search in self.searches.values_mut() {
-                    if search.token == result_token {
-                        search.results.push(search_result);
-                        break;
-                    }
+                if let Some(search) = self.searches.get_mut(&search_result.token) {
+                    search.results.push(search_result);
                 }
             }
             ClientOperation::PeerDisconnected(username, maybe_error) => {
@@ -323,8 +319,8 @@ impl ConnectedWorker {
                 self.server_sender = Some(sender);
                 debug!("[worker] Server sender initialized");
             }
-            ClientOperation::InitiateSearch(key, token) => {
-                self.searches.insert(key, Search { token, results: vec![] });
+            ClientOperation::InitiateSearch(token, query) => {
+                self.searches.insert(token, Search { token, query, results: vec![] });
             }
             ClientOperation::QueryDownloadByToken(token, tx) => {
                 let _ = tx.send(self.downloads.get(&token).cloned());
@@ -332,21 +328,14 @@ impl ConnectedWorker {
             ClientOperation::QueryDownloads(tx) => {
                 let _ = tx.send(self.downloads.values().cloned().collect());
             }
-            ClientOperation::QuerySearchResults(key, tx) => {
+            ClientOperation::QuerySearchResults(query, tx) => {
                 let _ = tx.send(
                     self.searches
-                        .get(&key)
+                        .values()
+                        .find(|s| s.query == query)
                         .map(|s| s.results.clone())
                         .unwrap_or_default(),
                 );
-            }
-            ClientOperation::QuerySearchResultsCount(key, tx) => {
-                let _ = tx.send(
-                    self.searches.get(&key).map(|s| s.results.len()).unwrap_or(0),
-                );
-            }
-            ClientOperation::QueryAllSearches(tx) => {
-                let _ = tx.send(self.searches.clone());
             }
         }
     }

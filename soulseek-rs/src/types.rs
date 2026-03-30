@@ -59,7 +59,8 @@ pub struct SearchResult {
 
 #[derive(Debug, Clone)]
 pub struct Search {
-    pub token: SearchToken,
+    pub token:   SearchToken,
+    pub query:   String,
     pub results: Vec<SearchResult>,
 }
 
