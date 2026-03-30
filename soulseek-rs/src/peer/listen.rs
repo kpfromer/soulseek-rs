@@ -1,5 +1,6 @@
 use std::io;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
@@ -14,6 +15,7 @@ use crate::{DownloadStatus, debug, error, info, trace};
 
 const PEER_INIT_MESSAGE_CODE: u8 = 1;
 const PIERCE_FIREWALL_MESSAGE_CODE: u8 = 0;
+const PEER_INIT_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone)]
 struct ConnectionContext {
@@ -116,9 +118,21 @@ async fn handle_incoming_connection(stream: TcpStream, context: ConnectionContex
     let mut stream = stream;
     let mut reader = MessageReader::new();
 
-    let Ok(mut message) = read_peer_init_message(&mut stream, &mut reader).await else {
-        error!("[listener:{peer_ip}:{peer_port}] Failed to read peer init message");
-        return;
+    let mut message = match tokio::time::timeout(
+        PEER_INIT_TIMEOUT,
+        read_peer_init_message(&mut stream, &mut reader),
+    )
+    .await
+    {
+        Ok(Ok(msg)) => msg,
+        Ok(Err(e)) => {
+            error!("[listener:{peer_ip}:{peer_port}] Failed to read peer init message: {e}");
+            return;
+        }
+        Err(_) => {
+            debug!("[listener:{peer_ip}:{peer_port}] Peer init timed out, dropping connection");
+            return;
+        }
     };
 
     // Check for PierceFireWall message (code 0)
