@@ -241,7 +241,7 @@ impl PeerActor {
                 self.on_connection_established();
             }
             PeerMessage::ConnectionFailed(e) => {
-                self.disconnect_with_error(e);
+                self.disconnect(Some(e));
             }
             PeerMessage::UploadFailed(username, filename) => {
                 self.client_channel
@@ -286,7 +286,7 @@ impl PeerActor {
                         e,
                         e.kind()
                     );
-                    self.disconnect_with_error(e);
+                    self.disconnect(Some(e));
                     return;
                 }
             }
@@ -320,7 +320,7 @@ impl PeerActor {
                         "[peer:{}] Error extracting message: {}. Disconnecting peer.",
                         username, e
                     );
-                    self.disconnect_with_error(e);
+                    self.disconnect(Some(e));
                     return;
                 }
                 Ok(None) => {
@@ -372,35 +372,18 @@ impl PeerActor {
                     "[peer:{}] Error writing message: {}. Disconnecting.",
                     username, e
                 );
-                self.disconnect_with_error(e);
+                self.disconnect(Some(e));
             }
         }
     }
 
-    fn disconnect_with_error(&mut self, error: io::Error) {
-        let username = self.peer.username.clone();
-        debug!("[peer:{}] disconnect", username);
-
+    fn disconnect(&mut self, error: Option<io::Error>) {
+        debug!("[peer:{}] disconnect", self.peer.username);
         self.stream.take();
-
         if let Err(e) = self.client_channel.send(ClientOperation::PeerDisconnected(
-            username,
-            Some(error.into()),
+            self.peer.username.clone(),
+            error.map(Into::into),
         )) {
-            error!("Failed to send disconnect notification: {}", e);
-        }
-    }
-
-    fn disconnect(&mut self) {
-        let username = self.peer.username.clone();
-        debug!("[peer:{}] disconnect", username);
-
-        self.stream.take();
-
-        if let Err(e) = self
-            .client_channel
-            .send(ClientOperation::PeerDisconnected(username, None))
-        {
             error!("Failed to send disconnect notification: {}", e);
         }
     }
@@ -449,7 +432,7 @@ impl PeerActor {
                     "[peer:{}] Invalid socket address {}:{} - {}",
                     username, host, port, e
                 );
-                self.disconnect_with_error(io::Error::new(io::ErrorKind::InvalidInput, e));
+                self.disconnect(Some(io::Error::new(io::ErrorKind::InvalidInput, e)));
                 false
             }
         }
@@ -463,10 +446,10 @@ impl PeerActor {
         // Safety timeout in case the async connect task never responds
         if since.elapsed() > Duration::from_secs(10) {
             error!("[peer:{}] Connection timeout after 10 seconds", self.peer.username);
-            self.disconnect_with_error(io::Error::new(
+            self.disconnect(Some(io::Error::new(
                 io::ErrorKind::TimedOut,
                 "Connection timeout",
-            ));
+            )));
         }
     }
 
@@ -494,7 +477,7 @@ impl PeerActor {
                         "[peer:{}] Failed to send PierceFireWall handshake: {}",
                         username, e
                     );
-                    self.disconnect_with_error(e);
+                    self.disconnect(Some(e));
                     return;
                 }
             }
@@ -533,7 +516,7 @@ impl Actor for PeerActor {
 
     fn on_stop(&mut self) {
         trace!("[peer:{}] actor stopping", self.peer.username);
-        self.disconnect();
+        self.disconnect(None);
     }
 
     fn tick(&mut self) {
