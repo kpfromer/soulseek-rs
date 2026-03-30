@@ -153,17 +153,6 @@ async fn handle_incoming_connection(stream: TcpStream, context: ConnectionContex
             return;
         };
 
-        let peer = Peer::new(
-            format!("{}:pierce", peer_ip),
-            ConnectionType::F,
-            peer_ip.clone(),
-            peer_port.into(),
-            None,
-            0,
-            0,
-            0,
-        );
-
         // Convert tokio TcpStream to std for DownloadPeer (which still uses blocking I/O)
         let std_stream = stream.into_std().unwrap();
         let client_sender = context.client_sender.clone();
@@ -171,9 +160,9 @@ async fn handle_incoming_connection(stream: TcpStream, context: ConnectionContex
 
         tokio::task::spawn_blocking(move || {
             let download_peer = DownloadPeer::new(
-                peer.username.clone(),
-                peer.host.clone(),
-                peer.port,
+                download.username.clone(),
+                peer_ip.clone(),
+                peer_port.into(),
                 token.0,
                 own_username,
             );
@@ -209,7 +198,7 @@ async fn handle_incoming_connection(stream: TcpStream, context: ConnectionContex
     );
 
     let peer = Peer::new(
-        format!("{}:direct", init_data.username),
+        init_data.username.clone(),
         init_data.connection_type.clone(),
         peer_ip.clone(),
         peer_port.into(),
@@ -264,7 +253,7 @@ async fn handle_incoming_connection(stream: TcpStream, context: ConnectionContex
                     peer_ip, peer_port
                 );
                 let download_peer = DownloadPeer::new(
-                    format!("{}:direct", peer_username),
+                    peer_username.clone(),
                     peer_host.clone(),
                     peer_port_val,
                     connection_token,
