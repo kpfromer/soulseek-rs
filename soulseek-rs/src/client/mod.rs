@@ -7,7 +7,7 @@ use crate::{
     actor::peer_registry::PeerRegistry,
     error::{Result, SoulseekRs},
     peer::listen::Listen,
-    types::{Download, Search, SearchResult},
+    types::{Download, SearchResult},
     utils::md5,
 };
 use crate::{error, info, trace};
@@ -26,7 +26,6 @@ mod download_slot;
 mod inner;
 pub(super) mod operation;
 mod settings;
-pub(super) mod state_monitor;
 
 use connected_worker::ConnectedWorker;
 pub use context::ClientContext;
@@ -34,7 +33,6 @@ pub use download_handle::DownloadHandle;
 pub use inner::{ActiveConnection, ClientInner, ClientState, PendingDownload};
 pub use operation::ClientOperation;
 pub use settings::*;
-use state_monitor::{WorkerEvent, state_monitor};
 
 #[derive(Clone)]
 pub struct Client {
@@ -109,7 +107,6 @@ impl Client {
         let cancellation_token = actor_system.cancellation_token().clone();
 
         let (op_tx, op_rx) = mpsc::unbounded_channel::<ClientOperation>();
-        let (event_tx, event_rx) = mpsc::unbounded_channel::<WorkerEvent>();
 
         // Build fully-initialized context before spawning anything.
         let context = {
@@ -129,7 +126,7 @@ impl Client {
             own_username: username.clone(),
             op_tx: op_tx.clone(),
             op_rx,
-            event_tx,
+            inner: self.inner.clone(),
             context: context.clone(),
             cancellation_token: cancellation_token.clone(),
             server_sender: None,
@@ -141,10 +138,6 @@ impl Client {
             searches: HashMap::new(),
         };
         tokio::spawn(async move { worker.run().await });
-
-        // Spawn state_monitor
-        let inner_clone = self.inner.clone();
-        tokio::spawn(async move { state_monitor(event_rx, inner_clone).await });
 
         // Spawn ServerActor — starts sending to op_tx; worker is already running.
         let server_actor = ServerActor::new(

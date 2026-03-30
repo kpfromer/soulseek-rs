@@ -1,15 +1,14 @@
 use std::collections::HashMap;
 use std::collections::VecDeque;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
 
 use super::download_slot::DownloadSlot;
-use super::state_monitor::WorkerEvent;
 use crate::actor::server_actor::ServerMessage;
-use crate::client::inner::PendingDownload;
+use crate::client::inner::{ClientInner, ClientState, PendingDownload};
 use crate::client::{ClientContext, ClientOperation};
 use crate::path::SoulseekPath;
 use crate::token::{DownloadToken, SearchToken};
@@ -20,13 +19,13 @@ use crate::peer::{ConnectionType, DownloadPeer, Peer};
 
 /// Owns the incoming-operations loop for a live connection.
 /// Handles all `ClientOperation` messages from actors (server, peers).
-/// State-transition events are forwarded to `state_monitor` via `event_tx`.
 pub struct ConnectedWorker {
     pub own_username: String,
     /// Sender half — cloned into spawned closures so they can send back operations.
     pub op_tx: UnboundedSender<ClientOperation>,
     pub op_rx: UnboundedReceiver<ClientOperation>,
-    pub event_tx: UnboundedSender<WorkerEvent>,
+    /// Shared client state — worker mutates `.state` directly on connect/disconnect.
+    pub inner: Arc<Mutex<ClientInner>>,
     pub context: Arc<ClientContext>,
     pub cancellation_token: CancellationToken,
     /// Sender to the ServerActor dispatcher. Populated by `SetServerSender` on first connect.
@@ -69,16 +68,14 @@ impl ConnectedWorker {
         match op {
             ClientOperation::ServerDisconnected => {
                 self.logged_in = false;
-                if let Err(e) = self.event_tx.send(WorkerEvent::ServerDisconnected) {
-                    error!("[worker] Failed to forward ServerDisconnected: {}", e);
-                }
+                self.inner.lock().unwrap_or_else(|e| e.into_inner()).state =
+                    ClientState::Disconnected;
             }
             ClientOperation::LoginSucceeded => {
                 self.logged_in = true;
+                self.inner.lock().unwrap_or_else(|e| e.into_inner()).state =
+                    ClientState::Connected;
                 self.drain_pending_queue();
-                if let Err(e) = self.event_tx.send(WorkerEvent::LoginSucceeded) {
-                    error!("[worker] Failed to forward LoginSucceeded: {}", e);
-                }
             }
             ClientOperation::DownloadCompleted(token, result) => {
                 let status = match result {
