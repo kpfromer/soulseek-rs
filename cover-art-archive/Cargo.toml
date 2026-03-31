@@ -3,7 +3,15 @@ name = "cover-art-archive"
 version.workspace = true
 edition.workspace = true
 
+[[example]]
+name = "fetch"
+
 [dependencies]
 reqwest = { version = "0.12", features = ["json"] }
 thiserror = "2"
 url = "2.5.8"
+
+[dev-dependencies]
+clap = { version = "4", features = ["derive", "env"] }
+musicbrainz = { path = "../musicbrainz" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
