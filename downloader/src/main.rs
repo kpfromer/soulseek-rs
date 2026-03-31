@@ -157,8 +157,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             while let Some(status) = handle.recv().await {
                 match status {
-                    DownloadStatus::Queued => {
-                        track_bar.set_message(format!("{attempt_label}  [queued]"));
+                    DownloadStatus::QueuedLocally => {
+                        track_bar.set_message(format!("{attempt_label}  [queued locally]"));
+                    }
+                    DownloadStatus::QueuedRemotely { place } => {
+                        track_bar.set_message(format!("{attempt_label}  [queued remotely: {:?}]", place));
                     }
                     DownloadStatus::InProgress {
                         bytes_downloaded,

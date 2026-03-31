@@ -138,8 +138,8 @@ impl ActorSystem {
         cancellation_token: CancellationToken,
     ) {
         let tick_interval = Duration::from_millis(100);
-        let mut message_count = 0;
-        let mut tick_count = 0;
+        let mut _message_count = 0;
+        let mut _tick_count = 0;
 
         loop {
             tokio::select! {
@@ -152,7 +152,7 @@ impl ActorSystem {
                 msg = receiver.recv() => {
                     match msg {
                         Some(ActorMessage::UserMessage(msg)) => {
-                            message_count += 1;
+                            _message_count += 1;
                             actor.handle(msg);
                         }
                         Some(ActorMessage::Stop) => {
@@ -162,10 +162,10 @@ impl ActorSystem {
                             break;
                         }
                         Some(ActorMessage::Tick) => {
-                            tick_count += 1;
+                            _tick_count += 1;
                             trace!(
                                 "[actor_system] Received explicit Tick message #{}",
-                                tick_count
+                                _tick_count
                             );
                             actor.tick();
                         }
@@ -178,14 +178,14 @@ impl ActorSystem {
                     }
                 }
                 _ = tokio::time::sleep(tick_interval) => {
-                    tick_count += 1;
+                    _tick_count += 1;
                     actor.tick();
                 }
             }
         }
         trace!(
             "[actor_system] run_actor_loop ENDED - processed {} messages, {} ticks",
-            message_count, tick_count
+            _message_count, _tick_count
         );
     }
 }

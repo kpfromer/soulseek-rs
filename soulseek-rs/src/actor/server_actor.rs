@@ -13,7 +13,9 @@ use crate::message::server::ParentSpeedRatioHandler;
 use crate::message::server::PrivilegedUsersHandler;
 use crate::message::server::RoomListHandler;
 use crate::message::server::WishListIntervalHandler;
-use crate::message::{Handlers, MessageType};
+use crate::message::Handlers;
+#[allow(unused_imports)]
+use crate::message::MessageType;
 use crate::message::{Message, MessageReader};
 use crate::peer::ConnectionType;
 use crate::peer::Peer;
@@ -54,6 +56,7 @@ impl std::fmt::Display for PeerAddress {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct UserMessage {
     id: u32,
@@ -328,8 +331,8 @@ impl ServerActor {
                     }
                     ConnectionType::D => None,
                 } {
-                    if let Err(e) = self.client_channel.send(op) {
-                        error!("[server] Failed to send ConnectToPeer: {}", e);
+                    if let Err(_e) = self.client_channel.send(op) {
+                        error!("[server] Failed to send ConnectToPeer: {}", _e);
                     }
                 }
             }
@@ -349,8 +352,8 @@ impl ServerActor {
                 }
 
                 if logged_in {
-                    if let Err(e) = self.client_channel.send(ClientOperation::LoginSucceeded) {
-                        error!("[server] Failed to send LoginSucceeded: {}", e);
+                    if let Err(_e) = self.client_channel.send(ClientOperation::LoginSucceeded) {
+                        error!("[server] Failed to send LoginSucceeded: {}", _e);
                     }
 
                     self.queue_message(MessageFactory::build_shared_folders_message(
@@ -381,7 +384,7 @@ impl ServerActor {
                     username, host, port, obfuscation_type, obfuscated_port
                 );
 
-                if let Err(e) = self
+                if let Err(_e) = self
                     .client_channel
                     .send(ClientOperation::GetPeerAddressResponse {
                         username,
@@ -393,7 +396,7 @@ impl ServerActor {
                 {
                     error!(
                         "[server] Error forwarding GetPeerAddress response to client: {}",
-                        e
+                        _e
                     );
                 }
             }
@@ -440,14 +443,14 @@ impl ServerActor {
     }
 
     fn extract_and_process_messages(&mut self) {
-        let mut extracted_count = 0;
+        let mut _extracted_count = 0;
         loop {
             match self.reader.extract_message() {
                 Ok(Some(mut message)) => {
-                    extracted_count += 1;
+                    _extracted_count += 1;
                     trace!(
                         "[server] ← Message #{}: {:?}",
-                        extracted_count,
+                        _extracted_count,
                         message
                             .get_message_name(
                                 MessageType::Server,
@@ -497,9 +500,9 @@ impl ServerActor {
 
         let buf = message.get_buffer();
         match stream.try_write(&buf) {
-            Ok(n) if n == buf.len() => {}
-            Ok(n) => {
-                error!("[server] Partial write: {} of {} bytes", n, buf.len());
+            Ok(_n) if _n == buf.len() => {}
+            Ok(_n) => {
+                error!("[server] Partial write: {} of {} bytes", _n, buf.len());
             }
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                 warn!("[server] Write would block, message may be lost");
@@ -531,11 +534,11 @@ impl ServerActor {
             self.login_state = LoginState::LoggedIn { credentials };
         }
 
-        if let Err(e) = self
+        if let Err(_e) = self
             .client_channel
             .send(ClientOperation::ServerDisconnected)
         {
-            error!("[server] Failed to send ServerDisconnected: {}", e);
+            error!("[server] Failed to send ServerDisconnected: {}", _e);
         }
     }
 

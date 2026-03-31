@@ -1,26 +1,20 @@
 use std::collections::HashMap;
-use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
 
-use super::download_slot::DownloadSlot;
+use super::download_manager::DownloadManager;
 use crate::actor::server_actor::ServerCommand;
 use crate::actor::ActorHandle;
-use crate::client::inner::{ClientInner, ClientState, PendingDownload};
+use crate::client::inner::{ClientInner, ClientState};
 use crate::client::{ClientContext, ClientOperation};
-use crate::path::SoulseekPath;
 use crate::token::{DownloadToken, PeerTransferToken, SearchToken};
-use crate::types::DownloadStatus;
 use crate::types::{Download, Search};
-use crate::{debug, error, info, trace, warn};
+use crate::{debug, error, trace, warn};
 use crate::peer::download_peer::spawn_direct_download;
 use crate::peer::{ConnectionType, DownloadPeer, Peer};
-
-const QUEUE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Owns the incoming-operations loop for a live connection.
 /// Handles all `ClientOperation` messages from actors (server, peers).
@@ -35,15 +29,8 @@ pub struct ConnectedWorker {
     pub cancellation_token: CancellationToken,
     /// Handle to ServerActor — used to send commands (PierceFirewall, GetPeerAddress).
     pub server_handle: ActorHandle<ServerCommand>,
-    // Download concurrency queue — the single source of truth for pending downloads.
-    pub logged_in: bool,
-    pub pending: VecDeque<PendingDownload>,
-    pub max_concurrent: Option<u32>,
-    /// Holds one [`DownloadSlot`] per in-flight download. `active_slots.len()` is the active count.
-    /// Removing an entry drops the slot, freeing the concurrency slot automatically.
-    pub active_slots: HashMap<DownloadToken, DownloadSlot>,
-    /// All known downloads (queued or in-flight).
-    pub downloads: HashMap<DownloadToken, Download>,
+    /// All download lifecycle logic.
+    pub downloads: DownloadManager,
     /// All active searches keyed by token.
     pub searches: HashMap<SearchToken, Search>,
 }
@@ -71,97 +58,45 @@ impl ConnectedWorker {
 
     async fn handle_operation(&mut self, op: ClientOperation) {
         match op {
+            // ── Server lifecycle ─────────────────────────────────────────────
             ClientOperation::ServerDisconnected => {
-                self.logged_in = false;
+                self.downloads.on_server_disconnected();
                 self.inner.lock().unwrap_or_else(|e| e.into_inner()).state =
                     ClientState::Disconnected;
             }
             ClientOperation::LoginSucceeded => {
-                self.logged_in = true;
+                self.downloads.on_login_succeeded();
                 self.inner.lock().unwrap_or_else(|e| e.into_inner()).state =
                     ClientState::Connected;
-                self.drain_pending_queue();
+            }
+
+            // ── Download events ───────────────────────────────────────────────
+            ClientOperation::RequestDownload(download) => {
+                self.downloads.enqueue(download);
             }
             ClientOperation::DownloadCompleted(token, result) => {
-                let status = match result {
-                    Ok(ref path) => {
-                        info!("Successfully downloaded to {}", path);
-                        DownloadStatus::Completed
-                    }
-                    Err(crate::error::SoulseekRs::DownloadCancelled) => DownloadStatus::Cancelled,
-                    Err(crate::error::SoulseekRs::DownloadTimedOut) => DownloadStatus::TimedOut,
-                    Err(ref e) => {
-                        error!("Download failed: {}", e);
-                        DownloadStatus::Failed
-                    }
-                };
-                if let Some(download) = self.downloads.get(&token) {
-                    let _ = download.sender.send(status.clone());
-                }
-                if let Some(download) = self.downloads.get_mut(&token) {
-                    download.status = status;
-                }
-                self.active_slots.remove(&token);
-                self.try_dequeue_next();
+                self.downloads.on_completed(token, result);
             }
-            ClientOperation::RequestDownload(pd) => {
-                // Insert immediately so it's visible to queries even while queued.
-                self.downloads.insert(pd.token, pd.to_download());
-                // Notify caller immediately that the download was accepted.
-                let _ = pd.status_sender.send(DownloadStatus::Queued);
-                if self.logged_in && self.max_concurrent.is_none_or(|max| (self.active_slots.len() as u32) < max) {
-                    self.try_initiate(pd);
-                } else {
-                    self.pending.push_back(pd);
-                }
+            ClientOperation::CancelDownload(token) => {
+                self.downloads.on_cancel(token);
             }
-            ClientOperation::ConnectToPeer(peer) => {
-                let connector = self.peer_connector();
-                let downloads = self.downloads.clone();
-                tokio::spawn(async move {
-                    match peer.connection_type {
-                        ConnectionType::P => connector.connect_p(peer, None),
-                        ConnectionType::F => connector.connect_f(peer, downloads, None),
-                        ConnectionType::D => error!("ConnectionType::D not implemented"),
-                    }
-                });
+            ClientOperation::DownloadResponseTimeout(token) => {
+                self.downloads.on_timeout(token);
             }
-            ClientOperation::SearchResult(search_result) => {
-                trace!("[worker] SearchResult {:?}", search_result);
-                if let Some(search) = self.searches.get_mut(&search_result.token) {
-                    search.results.push(search_result);
-                }
+            ClientOperation::UpdateDownloadTokens(transfer, username) => {
+                self.downloads.on_transfer_request(&transfer, &username);
             }
-            ClientOperation::PeerDisconnected(username, maybe_error) => {
-                if let Some(handle) = self.context.peer_registry.remove_peer(&username) {
-                    let _ = handle.stop();
-                }
-                if let Some(ref error) = maybe_error {
-                    warn!(
-                        "[worker] Peer {} disconnected with error: {:?}",
-                        username, error
-                    );
-                }
-                // Fail any queued downloads for this peer regardless of whether the disconnect
-                // was clean or due to an error — the peer is gone and will never send a
-                // TransferRequest.
-                self.process_failed_uploads(&username, None);
+            ClientOperation::QueuePositionUpdated { username, filename, place } => {
+                self.downloads.on_queue_position(&username, &filename, place);
             }
-            ClientOperation::PierceFireWall(peer) => {
-                debug!("Piercing firewall for peer: {:?}", peer);
-                if let Some(token) = peer.token {
-                    if let Err(e) = self.server_handle.send(ServerCommand::PierceFirewall(token)) {
-                        error!("Failed to send PierceFirewall message: {}", e);
-                    }
-                } else {
-                    error!("No token available for PierceFirewall");
-                }
-                self.peer_connector().connect_f(peer, self.downloads.clone(), None);
+            ClientOperation::TransferRejected { token, .. } => {
+                self.downloads.on_transfer_rejected(token);
+            }
+            ClientOperation::UploadFailed(username, filename) => {
+                self.downloads.on_upload_failed(&username, &filename);
             }
             ClientOperation::DownloadFromPeer(peer_transfer_token, peer, _allowed) => {
-                let maybe_download = self.downloads.values()
-                    .find(|d| d.peer_token == Some(peer_transfer_token))
-                    .cloned();
+                let maybe_download = self.downloads.find_by_peer_token(peer_transfer_token).cloned();
                 let own_username = self.own_username.clone();
                 let op_tx = self.op_tx.clone();
 
@@ -172,12 +107,57 @@ impl ConnectedWorker {
 
                 match maybe_download {
                     Some(download) => {
-                        spawn_direct_download(download, peer.host, peer.port, peer_transfer_token.0, own_username, None, op_tx);
+                        spawn_direct_download(
+                            download,
+                            peer.host,
+                            peer.port,
+                            peer_transfer_token.0,
+                            own_username,
+                            None,
+                            op_tx,
+                        );
                     }
                     None => {
                         error!("Can't find download with peer_token {:?}", peer_transfer_token);
                     }
                 }
+            }
+
+            // ── Peer lifecycle ────────────────────────────────────────────────
+            ClientOperation::PeerDisconnected(username, maybe_error) => {
+                if let Some(handle) = self.context.peer_registry.remove_peer(&username) {
+                    let _ = handle.stop();
+                }
+                if let Some(ref error) = maybe_error {
+                    warn!(
+                        "[worker] Peer {} disconnected with error: {:?}",
+                        username, error
+                    );
+                }
+                self.downloads.on_peer_disconnected(&username);
+            }
+            ClientOperation::PierceFireWall(peer) => {
+                debug!("Piercing firewall for peer: {:?}", peer);
+                if let Some(token) = peer.token {
+                    if let Err(_e) = self.server_handle.send(ServerCommand::PierceFirewall(token)) {
+                        error!("Failed to send PierceFirewall message: {}", _e);
+                    }
+                } else {
+                    error!("No token available for PierceFirewall");
+                }
+                let initiating_token = self.downloads.find_initiating_token(&peer.username);
+                self.peer_connector().connect_f(peer, initiating_token, None);
+            }
+            ClientOperation::ConnectToPeer(peer) => {
+                let connector = self.peer_connector();
+                let initiating_token = self.downloads.find_initiating_token(&peer.username);
+                tokio::spawn(async move {
+                    match peer.connection_type {
+                        ConnectionType::P => connector.connect_p(peer, None),
+                        ConnectionType::F => connector.connect_f(peer, initiating_token, None),
+                        ConnectionType::D => error!("ConnectionType::D not implemented"),
+                    }
+                });
             }
             ClientOperation::NewPeer(new_peer) => {
                 let peer_exists = self.context.peer_registry.contains(&new_peer.username);
@@ -187,8 +167,8 @@ impl ConnectedWorker {
                 } else {
                     self.server_handle
                         .send(ServerCommand::GetPeerAddress(new_peer.username.clone()))
-                        .unwrap_or_else(|e| {
-                            error!("[worker] Failed to send GetPeerAddress: {}", e)
+                        .unwrap_or_else(|_e| {
+                            error!("[worker] Failed to send GetPeerAddress: {}", _e)
                         });
                 }
 
@@ -208,10 +188,12 @@ impl ConnectedWorker {
                 };
 
                 let connector = self.peer_connector();
-                let downloads = self.downloads.clone();
+                let initiating_token = self.downloads.find_initiating_token(&peer.username);
                 match peer.connection_type {
                     ConnectionType::P => connector.connect_p(peer, Some(new_peer.tcp_stream)),
-                    ConnectionType::F => connector.connect_f(peer, downloads, Some(new_peer.tcp_stream)),
+                    ConnectionType::F => {
+                        connector.connect_f(peer, initiating_token, Some(new_peer.tcp_stream))
+                    }
                     ConnectionType::D => error!("ConnectionType::D not implemented"),
                 }
             }
@@ -244,32 +226,25 @@ impl ConnectedWorker {
                     tokio::spawn(async move { connector.connect_p(peer, None) });
                 }
             }
-            ClientOperation::UpdateDownloadTokens(transfer, username) => {
-                if let Some(download) = self.downloads.values_mut().find(|d| {
-                    d.username == username && d.filename == transfer.filename
-                }) {
-                    trace!(
-                        "[worker] UpdateDownloadTokens: {} peer_token={} size={}",
-                        download.token, transfer.token, transfer.size
-                    );
-                    download.peer_token = Some(transfer.token);
-                    download.size = transfer.size;
+
+            // ── Search events ─────────────────────────────────────────────────
+            ClientOperation::SearchResult(search_result) => {
+                trace!("[worker] SearchResult {:?}", search_result);
+                if let Some(search) = self.searches.get_mut(&search_result.token) {
+                    search.results.push(search_result);
                 }
-            }
-            ClientOperation::UploadFailed(username, filename) => {
-                self.process_failed_uploads(&username, Some(&filename));
             }
             ClientOperation::InitiateSearch(token, query) => {
                 self.searches.insert(token, Search { token, query, results: vec![] });
             }
+
+            // ── Queries ───────────────────────────────────────────────────────
             ClientOperation::QueryDownloadByToken(peer_token, tx) => {
-                let download = self.downloads.values()
-                    .find(|d| d.peer_token == Some(peer_token))
-                    .cloned();
+                let download = self.downloads.find_by_peer_token(peer_token).cloned();
                 let _ = tx.send(download);
             }
             ClientOperation::QueryDownloads(tx) => {
-                let _ = tx.send(self.downloads.values().cloned().collect());
+                let _ = tx.send(self.downloads.get_all());
             }
             ClientOperation::QuerySearchResults(query, tx) => {
                 let _ = tx.send(
@@ -280,93 +255,6 @@ impl ConnectedWorker {
                         .unwrap_or_default(),
                 );
             }
-            ClientOperation::CancelDownload(token) => {
-                // Remove from pending queue (not yet started).
-                self.pending.retain(|pd| pd.token != token);
-                // Remove from active downloads; notify caller and free the slot.
-                if let Some(download) = self.downloads.remove(&token) {
-                    let _ = download.sender.send(DownloadStatus::Cancelled);
-                    if self.active_slots.remove(&token).is_some() {
-                        self.try_dequeue_next();
-                    }
-                }
-            }
-            ClientOperation::DownloadResponseTimeout(token) => {
-                // Only time out if peer_token is still None (no TransferRequest received yet).
-                let still_waiting = self.downloads.get(&token)
-                    .map_or(false, |d| d.peer_token.is_none());
-                if still_waiting {
-                    if let Some(download) = self.downloads.remove(&token) {
-                        let _ = download.sender.send(DownloadStatus::TimedOut);
-                    }
-                    if self.active_slots.remove(&token).is_some() {
-                        self.try_dequeue_next();
-                    }
-                }
-            }
-        }
-    }
-
-    /// Initiate a download: ensure it's in the downloads map, queue upload with peer registry,
-    /// and acquire a concurrency slot.
-    fn try_initiate(&mut self, pd: PendingDownload) {
-        // Insert/update so pre-pending items are also visible.
-        self.downloads.insert(pd.token, pd.to_download());
-        let _ = self.context.peer_registry.queue_upload(&pd.username, pd.filename.clone());
-        self.active_slots.insert(pd.token, DownloadSlot);
-
-        // 30-second deadline for peer to reply with TransferRequest.
-        let op_tx = self.op_tx.clone();
-        let token = pd.token;
-        tokio::spawn(async move {
-            tokio::time::sleep(QUEUE_RESPONSE_TIMEOUT).await;
-            let _ = op_tx.send(ClientOperation::DownloadResponseTimeout(token));
-        });
-    }
-
-    /// Drain pending queue up to the concurrency limit.
-    fn drain_pending_queue(&mut self) {
-        loop {
-            if self.max_concurrent.is_some_and(|max| (self.active_slots.len() as u32) >= max) {
-                break;
-            }
-            match self.pending.pop_front() {
-                Some(pd) => self.try_initiate(pd),
-                None => break,
-            }
-        }
-    }
-
-    /// Dequeue and initiate the next pending download if a slot is available.
-    fn try_dequeue_next(&mut self) {
-        if !self.logged_in {
-            return;
-        }
-        if self.max_concurrent.is_some_and(|max| (self.active_slots.len() as u32) >= max) {
-            return;
-        }
-        if let Some(pd) = self.pending.pop_front() {
-            self.try_initiate(pd);
-        }
-    }
-
-    fn process_failed_uploads(&mut self, username: &str, filename: Option<&SoulseekPath>) {
-        let failed_tokens: Vec<_> = self
-            .downloads
-            .values()
-            .filter(|d| d.username == username && filename.is_none_or(|f| d.filename == *f))
-            .map(|d| {
-                let _ = d.sender.send(DownloadStatus::Failed);
-                d.token
-            })
-            .collect();
-        let any_failed = !failed_tokens.is_empty();
-        for token in failed_tokens {
-            self.downloads.remove(&token);
-            self.active_slots.remove(&token); // slot drops → counter decremented
-        }
-        if any_failed {
-            self.try_dequeue_next();
         }
     }
 
@@ -379,8 +267,7 @@ impl ConnectedWorker {
     }
 }
 
-/// Encapsulates the shared context needed to initiate a peer connection,
-/// eliminating repetitive parameter passing across the four call sites.
+/// Encapsulates the shared context needed to initiate a peer connection.
 pub(super) struct PeerConnector {
     context: Arc<ClientContext>,
     own_username: String,
@@ -399,38 +286,26 @@ impl PeerConnector {
             s.set_nonblocking(true).ok();
             tokio::net::TcpStream::from_std(s).ok()
         });
-        if let Err(e) = self.context.peer_registry.register_peer(peer, tokio_stream, None) {
-            trace!("Failed to spawn peer actor for {:?}: {:?}", username, e);
+        if let Err(_e) = self.context.peer_registry.register_peer(peer, tokio_stream, None) {
+            trace!("Failed to spawn peer actor for {:?}: {:?}", username, _e);
         }
     }
 
-    /// Initiate an F-type (file transfer / pierce-firewall) download connection.
+    /// Initiate an F-type (pierce-firewall) download connection.
     ///
-    /// `downloads` is a snapshot of the current download map used to resolve the
-    /// wire token sent by the peer. `stream` is `Some` when the peer is already
-    /// connected (inbound); `None` when we need to dial out.
+    /// `initiating_token` is the `DownloadToken` for the pending download from this peer
+    /// (used as a fallback for pre-token failure reporting). `stream` is `Some` when the
+    /// peer is already connected (inbound); `None` when we need to dial out.
     pub fn connect_f(
         &self,
         peer: Peer,
-        downloads: HashMap<DownloadToken, Download>,
+        initiating_token: Option<DownloadToken>,
         stream: Option<std::net::TcpStream>,
     ) {
         trace!(
             "[worker] downloading F-type from: {}, {:?}",
             peer.username, peer.token
         );
-        // Build a peer-token-keyed snapshot for the resolve closure.
-        let peer_downloads: HashMap<PeerTransferToken, Download> = downloads
-            .values()
-            .filter_map(|d| d.peer_token.map(|pt| (pt, d.clone())))
-            .collect();
-
-        // Capture the initiating DownloadToken (by username) for pre-token failure reporting.
-        let initiating_token = downloads
-            .values()
-            .find(|d| d.username == peer.username)
-            .map(|d| d.token);
-
         let own_username = self.own_username.clone();
         let op_tx = self.op_tx.clone();
         let download_peer = DownloadPeer::new(
@@ -440,53 +315,55 @@ impl PeerConnector {
             peer.token.unwrap().0,
             own_username,
         );
+
         tokio::task::spawn_blocking(move || {
-            let peer_downloads_for_resolve = peer_downloads.clone();
-            let resolve = move |token: PeerTransferToken| peer_downloads_for_resolve.get(&token).cloned();
+            // Live resolve closure: queries the worker for the download by peer transfer token.
+            // Safe to block_on here because spawn_blocking runs on a dedicated thread.
+            let op_tx_resolve = op_tx.clone();
+            let resolve = move |token: PeerTransferToken| -> Option<Download> {
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                let _ = op_tx_resolve.send(ClientOperation::QueryDownloadByToken(token, tx));
+                tokio::runtime::Handle::current().block_on(rx).ok().flatten()
+            };
+
             match download_peer.download_pierced(resolve, stream) {
                 Ok((download, path)) => {
                     trace!("[worker] pierced download complete: {}", path);
-                    // download.token is our DownloadToken — always stable
-                    let _ = op_tx
-                        .send(ClientOperation::DownloadCompleted(download.token, Ok(path)));
+                    let _ = op_tx.send(ClientOperation::DownloadCompleted(download.token, Ok(path)));
                 }
-                Err((Some(peer_token), crate::peer::download_peer::DownloadError::Cancelled)) => {
-                    trace!("[worker] pierced download cancelled");
-                    let our_token = peer_downloads.get(&peer_token).map(|d| d.token);
-                    if let Some(token) = our_token.or(initiating_token) {
-                        let _ = op_tx.send(ClientOperation::DownloadCompleted(
-                            token,
-                            Err(crate::error::SoulseekRs::DownloadCancelled),
-                        ));
+                Err((maybe_peer_token, e)) => {
+                    let our_error = match &e {
+                        crate::peer::download_peer::DownloadError::Cancelled => {
+                            trace!("[worker] pierced download cancelled");
+                            crate::error::SoulseekRs::DownloadCancelled
+                        }
+                        crate::peer::download_peer::DownloadError::NoProgressTimeout => {
+                            trace!("[worker] pierced download timed out");
+                            crate::error::SoulseekRs::DownloadTimedOut
+                        }
+                        _ => {
+                            error!("[worker] pierced download failed: {}", e);
+                            crate::error::SoulseekRs::InvalidMessage(e.to_string())
+                        }
+                    };
+
+                    // Try to find our DownloadToken from the peer transfer token.
+                    let our_token = if let Some(peer_token) = maybe_peer_token {
+                        let (tx, rx) = tokio::sync::oneshot::channel();
+                        let _ = op_tx.send(ClientOperation::QueryDownloadByToken(peer_token, tx));
+                        tokio::runtime::Handle::current()
+                            .block_on(rx)
+                            .ok()
+                            .flatten()
+                            .map(|d| d.token)
+                    } else {
+                        warn!("[worker] pierce-firewall pre-token failure: {}", e);
+                        None
                     }
-                }
-                Err((Some(peer_token), crate::peer::download_peer::DownloadError::NoProgressTimeout)) => {
-                    trace!("[worker] pierced download timed out");
-                    let our_token = peer_downloads.get(&peer_token).map(|d| d.token);
-                    if let Some(token) = our_token.or(initiating_token) {
-                        let _ = op_tx.send(ClientOperation::DownloadCompleted(
-                            token,
-                            Err(crate::error::SoulseekRs::DownloadTimedOut),
-                        ));
-                    }
-                }
-                Err((Some(peer_token), e)) => {
-                    error!("[worker] pierced download failed: {}", e);
-                    let our_token = peer_downloads.get(&peer_token).map(|d| d.token);
-                    if let Some(token) = our_token.or(initiating_token) {
-                        let _ = op_tx.send(ClientOperation::DownloadCompleted(
-                            token,
-                            Err(crate::error::SoulseekRs::InvalidMessage(e.to_string())),
-                        ));
-                    }
-                }
-                Err((None, e)) => {
-                    warn!("[worker] pierce-firewall pre-token failure: {}", e);
-                    if let Some(token) = initiating_token {
-                        let _ = op_tx.send(ClientOperation::DownloadCompleted(
-                            token,
-                            Err(crate::error::SoulseekRs::InvalidMessage(e.to_string())),
-                        ));
+                    .or(initiating_token);
+
+                    if let Some(token) = our_token {
+                        let _ = op_tx.send(ClientOperation::DownloadCompleted(token, Err(our_error)));
                     }
                 }
             }
