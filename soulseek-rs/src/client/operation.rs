@@ -44,4 +44,6 @@ pub enum ClientOperation {
     QuerySearchResults(String, oneshot::Sender<Vec<SearchResult>>),
     /// Cancel a download by token; cleans up pending queue and active slots.
     CancelDownload(DownloadToken),
+    /// 30s deadline for peer to respond to QueueUpload; ignored if already progressing.
+    DownloadResponseTimeout(DownloadToken),
 }

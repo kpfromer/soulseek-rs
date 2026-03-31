@@ -136,7 +136,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let candidate_count = results.len();
         let mut succeeded = false;
 
-        'candidates: for (attempt, result) in results.iter().take(10).enumerate() {
+        'candidates: for (attempt, result) in results.iter().enumerate() {
             let attempt_label = format!(
                 "[{}/{}] {label}  (candidate {}/{})",
                 i + 1,

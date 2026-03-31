@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::UnboundedSender;
@@ -18,6 +19,8 @@ use crate::types::{Download, Search};
 use crate::{debug, error, info, trace, warn};
 use crate::peer::download_peer::spawn_direct_download;
 use crate::peer::{ConnectionType, DownloadPeer, Peer};
+
+const QUEUE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Owns the incoming-operations loop for a live connection.
 /// Handles all `ClientOperation` messages from actors (server, peers).
@@ -288,6 +291,19 @@ impl ConnectedWorker {
                     }
                 }
             }
+            ClientOperation::DownloadResponseTimeout(token) => {
+                // Only time out if peer_token is still None (no TransferRequest received yet).
+                let still_waiting = self.downloads.get(&token)
+                    .map_or(false, |d| d.peer_token.is_none());
+                if still_waiting {
+                    if let Some(download) = self.downloads.remove(&token) {
+                        let _ = download.sender.send(DownloadStatus::TimedOut);
+                    }
+                    if self.active_slots.remove(&token).is_some() {
+                        self.try_dequeue_next();
+                    }
+                }
+            }
         }
     }
 
@@ -298,6 +314,14 @@ impl ConnectedWorker {
         self.downloads.insert(pd.token, pd.to_download());
         let _ = self.context.peer_registry.queue_upload(&pd.username, pd.filename.clone());
         self.active_slots.insert(pd.token, DownloadSlot);
+
+        // 30-second deadline for peer to reply with TransferRequest.
+        let op_tx = self.op_tx.clone();
+        let token = pd.token;
+        tokio::spawn(async move {
+            tokio::time::sleep(QUEUE_RESPONSE_TIMEOUT).await;
+            let _ = op_tx.send(ClientOperation::DownloadResponseTimeout(token));
+        });
     }
 
     /// Drain pending queue up to the concurrency limit.
