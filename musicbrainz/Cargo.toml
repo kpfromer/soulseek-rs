@@ -21,5 +21,3 @@ which = "8"
 
 [dev-dependencies]
 clap = { version = "4", features = ["derive", "env"] }
-reqwest = "0.12"
-url = "2.5.8"
