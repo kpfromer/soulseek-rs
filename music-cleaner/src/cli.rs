@@ -70,4 +70,21 @@ pub struct Args {
     /// AcoustID API key used for audio fingerprint lookups.
     #[arg(long, env = "ACOUSTID_API_KEY", value_name = "KEY")]
     pub acoustid_api_key: String,
+
+    /// Destination directory for audio files that have no MusicBrainz match and no embedded tags.
+    ///
+    /// Defaults to an `unknown/` subdirectory within the output root.
+    /// Files placed here are never renamed — the original filename is preserved.
+    #[arg(long, value_name = "DIR")]
+    pub unknown_dir: Option<PathBuf>,
+
+    /// Maximum width for embedded cover art in pixels.
+    /// Larger images are scaled down, maintaining aspect ratio.
+    #[arg(long, value_name = "PIXELS")]
+    pub max_image_width: Option<u32>,
+
+    /// Maximum height for embedded cover art in pixels.
+    /// Larger images are scaled down, maintaining aspect ratio.
+    #[arg(long, value_name = "PIXELS")]
+    pub max_image_height: Option<u32>,
 }
