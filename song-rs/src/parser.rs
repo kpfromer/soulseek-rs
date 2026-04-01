@@ -3,7 +3,6 @@
 pub(crate) struct ParsedSoulseekMetadata {
     pub title: String,
     pub artist: String,
-    pub album: Option<String>,
 }
 
 /// Parse a Soulseek path string into track metadata.
@@ -42,14 +41,11 @@ pub(crate) fn parse_soulseek_filename(path: &str) -> ParsedSoulseekMetadata {
         vec![]
     };
 
-    // Album: second-to-last directory.
-    let album = dirs.last().map(|s| s.to_string());
-
-    // Artist fallback: third-to-last directory (one above album).
+    // Artist fallback: second-to-last directory (one above filename).
     let dir_artist = if dirs.len() >= 2 {
         Some(dirs[dirs.len() - 2].to_string())
     } else {
-        None
+        dirs.last().map(|s| s.to_string())
     };
 
     // Try to parse "Artist - Title" from the filename stem.
@@ -58,14 +54,12 @@ pub(crate) fn parse_soulseek_filename(path: &str) -> ParsedSoulseekMetadata {
         ParsedSoulseekMetadata {
             title: parsed_title,
             artist: parsed_artist,
-            album,
         }
     } else {
         // Fall back to directory-derived artist.
         ParsedSoulseekMetadata {
             title: stem_clean.trim().to_string(),
             artist: dir_artist.unwrap_or_default(),
-            album,
         }
     }
 }
@@ -92,7 +86,7 @@ fn strip_track_number(s: &str) -> &str {
     }
 
     // Skip optional separator(s): spaces, dashes, dots.
-    let rest = s[digit_end..].trim_start_matches(|c: char| c == '-' || c == '.' || c == ' ');
+    let rest = s[digit_end..].trim_start_matches(['-', '.', ' ']);
     if !rest.is_empty() {
         rest
     } else {
@@ -151,7 +145,6 @@ mod tests {
         );
         assert_eq!(m.title, "Bohemian Rhapsody");
         assert_eq!(m.artist, "Queen");
-        assert_eq!(m.album.as_deref(), Some("A Night at the Opera"));
     }
 
     #[test]

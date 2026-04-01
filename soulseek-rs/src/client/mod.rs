@@ -1,4 +1,4 @@
-use crate::actor::server_actor::{ServerActor, ServerCommand};
+use crate::actor::server_actor::{ServerActor, ServerActorConfig, ServerCommand};
 use crate::path::SoulseekPath;
 use crate::search_rate_limiter::SlidingRateLimiter;
 use crate::token::{DownloadToken, SearchToken};
@@ -142,12 +142,14 @@ impl Client {
         let server_actor = ServerActor::new(
             self.settings.server_address.clone(),
             op_tx.clone(),
-            self.settings.listen_port,
-            self.settings.enable_listen,
-            self.settings.shared_folders,
-            self.settings.shared_files,
-            self.settings.tcp_keepalive_settings.clone(),
-            self.settings.reconnect_settings.clone(),
+            ServerActorConfig {
+                listen_port: self.settings.listen_port,
+                enable_listen: self.settings.enable_listen,
+                shared_folders: self.settings.shared_folders,
+                shared_files: self.settings.shared_files,
+                tcp_keepalive: self.settings.tcp_keepalive_settings.clone(),
+                reconnect_settings: self.settings.reconnect_settings.clone(),
+            },
         );
         let server_handle = actor_system.spawn(server_actor);
 
@@ -196,7 +198,7 @@ impl Client {
                     result = Listen::start(listen_port, op_tx, context, own_username) => {
                         match result {
                             Ok(_) => info!("[listener] Listener started successfully"),
-                            Err(e) => error!("[listener] Failed to start listener: {}", e),
+                            Err(_e) => error!("[listener] Failed to start listener: {}", _e),
                         }
                     }
                 }

@@ -128,10 +128,10 @@ impl ConnectedWorker {
                 if let Some(handle) = self.context.peer_registry.remove_peer(&username) {
                     let _ = handle.stop();
                 }
-                if let Some(ref error) = maybe_error {
+                if let Some(ref _error) = maybe_error {
                     warn!(
                         "[worker] Peer {} disconnected with error: {:?}",
-                        username, error
+                        username, _error
                     );
                 }
                 self.downloads.on_peer_disconnected(&username);
@@ -164,12 +164,10 @@ impl ConnectedWorker {
 
                 if peer_exists {
                     debug!("Already connected to {}", new_peer.username);
-                } else {
-                    self.server_handle
-                        .send(ServerCommand::GetPeerAddress(new_peer.username.clone()))
-                        .unwrap_or_else(|_e| {
-                            error!("[worker] Failed to send GetPeerAddress: {}", _e)
-                        });
+                } else if let Err(_e) = self.server_handle
+                    .send(ServerCommand::GetPeerAddress(new_peer.username.clone()))
+                {
+                    error!("[worker] Failed to send GetPeerAddress: {}", _e);
                 }
 
                 let addr = new_peer.tcp_stream.peer_addr().unwrap();
@@ -277,17 +275,17 @@ pub(super) struct PeerConnector {
 impl PeerConnector {
     /// Register a P-type (messaging) peer connection.
     pub fn connect_p(&self, peer: Peer, stream: Option<std::net::TcpStream>) {
-        let username = peer.username.clone();
+        let _username = peer.username.clone();
         trace!(
             "[worker] connecting P-type to {}, token {:?}",
-            username, peer.token
+            _username, peer.token
         );
         let tokio_stream = stream.and_then(|s| {
             s.set_nonblocking(true).ok();
             tokio::net::TcpStream::from_std(s).ok()
         });
         if let Err(_e) = self.context.peer_registry.register_peer(peer, tokio_stream, None) {
-            trace!("Failed to spawn peer actor for {:?}: {:?}", username, _e);
+            trace!("Failed to spawn peer actor for {:?}: {:?}", _username, _e);
         }
     }
 

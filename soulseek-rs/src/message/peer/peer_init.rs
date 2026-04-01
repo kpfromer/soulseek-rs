@@ -16,11 +16,11 @@ impl MessageHandler<PeerSignal> for PeerInit {
         message.set_pointer(4);
         let _message_code = message.read_int8();
         let username = message.read_string();
-        let connection_type = message.read_string();
-        let token = message.read_int32();
+        let _connection_type = message.read_string();
+        let _token = message.read_int32();
         trace!(
             "PeerInit: username: {}, connection_type: {}, token: {}",
-            username, connection_type, token
+            username, _connection_type, _token
         );
 
         sender.send(PeerSignal::SetUsername(username)).unwrap();

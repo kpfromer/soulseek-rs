@@ -15,7 +15,7 @@ impl MessageHandler<ServerSignal> for ParentSpeedRatioHandler {
     }
 
     fn handle(&self, message: &mut Message, _sender: UnboundedSender<ServerSignal>) {
-        let number = message.read_int32();
-        debug!("Parent speed ratio: {}", number);
+        let _number = message.read_int32();
+        debug!("Parent speed ratio: {}", _number);
     }
 }

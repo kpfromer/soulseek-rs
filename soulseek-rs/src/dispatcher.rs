@@ -4,15 +4,13 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::warn;
 
 pub struct MessageDispatcher<Op> {
-    owner_name: String,
     sender: UnboundedSender<Op>,
     handlers: Handlers<Op>,
 }
 
 impl<Op> MessageDispatcher<Op> {
-    pub fn new(owner_name: String, sender: UnboundedSender<Op>, handlers: Handlers<Op>) -> Self {
+    pub fn new(sender: UnboundedSender<Op>, handlers: Handlers<Op>) -> Self {
         MessageDispatcher {
-            owner_name,
             sender,
             handlers,
         }
@@ -26,8 +24,7 @@ impl<Op> MessageDispatcher<Op> {
             handler.handle(message, self.sender.clone());
         } else {
             warn!(
-                "[{}:dispatcher] No handler found for message code: {}",
-                self.owner_name,
+                "[dispatcher] No handler found for message code: {}",
                 message.get_message_code()
             );
         }

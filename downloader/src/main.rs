@@ -77,7 +77,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     std::fs::create_dir_all(&args.download_dir)?;
 
-    let mut client = Client::new(&args.username, &args.password);
+    let client = Client::new(&args.username, &args.password);
     let wanted = WantedFileTypes::from(args.file_type);
     let timeout = Duration::from_secs(args.timeout);
     let download_dir = args.download_dir.to_string_lossy().to_string();

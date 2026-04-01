@@ -121,13 +121,11 @@ async fn process_file(path: &Path, args: &Args) -> anyhow::Result<ProcessOutcome
     }
 
     // ── 8. Resolve file conflict ─────────────────────────────────────────────
-    if output_path.exists() {
-        if !resolve_file_conflict(&output_path, args)? {
-            return Ok(ProcessOutcome::Skipped(format!(
-                "output already exists: {}",
-                output_path.display()
-            )));
-        }
+    if output_path.exists() && !resolve_file_conflict(&output_path, args)? {
+        return Ok(ProcessOutcome::Skipped(format!(
+            "output already exists: {}",
+            output_path.display()
+        )));
     }
 
     // ── 9. Copy or move ──────────────────────────────────────────────────────

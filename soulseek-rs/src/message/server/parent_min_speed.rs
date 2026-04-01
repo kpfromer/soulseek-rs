@@ -15,7 +15,7 @@ impl MessageHandler<ServerSignal> for ParentMinSpeedHandler {
 
     fn handle(&self, message: &mut Message, sender: UnboundedSender<ServerSignal>) {
         let _ = sender;
-        let number = message.read_int32();
-        debug!("Parent min speed: {}", number);
+        let _number = message.read_int32();
+        debug!("Parent min speed: {}", _number);
     }
 }

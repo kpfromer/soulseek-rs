@@ -111,7 +111,6 @@ impl PeerActor {
         handlers.register_handler(PeerInit);
 
         self.dispatcher = Some(MessageDispatcher::new(
-            "peer".to_string(),
             self.signal_tx.clone(),
             handlers,
         ));

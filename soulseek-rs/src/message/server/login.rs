@@ -18,17 +18,17 @@ impl MessageHandler<ServerSignal> for LoginHandler {
         }
 
         info!("Login successful");
-        let greeting = message.read_string();
-        debug!("Server greeting: {:?}", greeting);
+        let _greeting = message.read_string();
+        debug!("Server greeting: {:?}", _greeting);
 
-        let own_ip = message.read_int32();
-        debug!("Own IP: {}", own_ip);
+        let _own_ip = message.read_int32();
+        debug!("Own IP: {}", _own_ip);
 
-        let password_hash = message.read_string();
-        debug!("Password hash: {:?}", password_hash);
+        let _password_hash = message.read_string();
+        debug!("Password hash: {:?}", _password_hash);
 
-        let supporter = message.read_bool();
-        debug!("Supporter status: {}", supporter);
+        let _supporter = message.read_bool();
+        debug!("Supporter status: {}", _supporter);
 
         sender.send(ServerSignal::LoginStatus(true)).unwrap();
     }

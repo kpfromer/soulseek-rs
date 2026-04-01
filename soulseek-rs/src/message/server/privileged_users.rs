@@ -14,7 +14,7 @@ impl MessageHandler<ServerSignal> for PrivilegedUsersHandler {
     }
 
     fn handle(&self, message: &mut Message, _sender: UnboundedSender<ServerSignal>) {
-        let number = message.read_int32();
-        debug!("Number of privileged users: {}", number);
+        let _number = message.read_int32();
+        debug!("Number of privileged users: {}", _number);
     }
 }

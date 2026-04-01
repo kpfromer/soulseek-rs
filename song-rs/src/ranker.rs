@@ -172,8 +172,8 @@ fn levenshtein(a: &str, b: &str) -> usize {
     let n = b.len();
 
     let mut dp = vec![0usize; n + 1];
-    for j in 0..=n {
-        dp[j] = j;
+    for (j, cell) in dp.iter_mut().enumerate() {
+        *cell = j;
     }
 
     for i in 1..=m {

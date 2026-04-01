@@ -152,6 +152,15 @@ enum LoginState {
     },
 }
 
+pub struct ServerActorConfig {
+    pub listen_port: u32,
+    pub enable_listen: bool,
+    pub shared_folders: u32,
+    pub shared_files: u32,
+    pub tcp_keepalive: KeepAliveSettings,
+    pub reconnect_settings: ReconnectSettings,
+}
+
 pub struct ServerActor {
     address: PeerAddress,
     listen_port: u32,
@@ -173,20 +182,15 @@ impl ServerActor {
     pub fn new(
         address: PeerAddress,
         client_channel: UnboundedSender<ClientOperation>,
-        listen_port: u32,
-        enable_listen: bool,
-        shared_folders: u32,
-        shared_files: u32,
-        tcp_keepalive: KeepAliveSettings,
-        reconnect_settings: ReconnectSettings,
+        config: ServerActorConfig,
     ) -> Self {
         let (signal_tx, signal_rx) = mpsc::unbounded_channel::<ServerSignal>();
         Self {
             address,
-            listen_port,
-            enable_listen,
-            shared_folders,
-            shared_files,
+            listen_port: config.listen_port,
+            enable_listen: config.enable_listen,
+            shared_folders: config.shared_folders,
+            shared_files: config.shared_files,
             connection: ServerConnection::Disconnected { reconnect_attempt: 0, last_disconnect: None },
             login_state: LoginState::NotAttempted,
             reader: MessageReader::new(),
@@ -194,8 +198,8 @@ impl ServerActor {
             signal_tx,
             signal_rx,
             queued_messages: Vec::new(),
-            reconnect_settings,
-            tcp_keepalive,
+            reconnect_settings: config.reconnect_settings,
+            tcp_keepalive: config.tcp_keepalive,
         }
     }
 
@@ -330,10 +334,10 @@ impl ServerActor {
                         Some(ClientOperation::ConnectToPeer(peer.clone()))
                     }
                     ConnectionType::D => None,
-                } {
-                    if let Err(_e) = self.client_channel.send(op) {
-                        error!("[server] Failed to send ConnectToPeer: {}", _e);
-                    }
+                }
+                    && let Err(_e) = self.client_channel.send(op)
+                {
+                    error!("[server] Failed to send ConnectToPeer: {}", _e);
                 }
             }
             ServerSignal::LoginStatus(logged_in) => {
@@ -604,7 +608,7 @@ impl ServerActor {
         handlers.register_handler(ConnectToPeerHandler);
 
         let dispatcher = Dispatcher {
-            inner: MessageDispatcher::new("server".into(), self.signal_tx.clone(), handlers),
+            inner: MessageDispatcher::new(self.signal_tx.clone(), handlers),
         };
 
         self.connection = ServerConnection::Connected { stream, dispatcher };
@@ -648,14 +652,14 @@ impl ServerActor {
                 max_delay,
                 max_attempts,
             } => {
-                if let Some(max) = max_attempts {
-                    if reconnect_attempt > *max {
-                        warn!(
-                            "[server] Max reconnect attempts ({}) reached, giving up",
-                            max
-                        );
-                        return;
-                    }
+                if let Some(max) = max_attempts
+                    && reconnect_attempt > *max
+                {
+                    warn!(
+                        "[server] Max reconnect attempts ({}) reached, giving up",
+                        max
+                    );
+                    return;
                 }
                 let exp = reconnect_attempt.saturating_sub(1);
                 let factor = 1u64.checked_shl(exp).unwrap_or(u64::MAX);
@@ -706,14 +710,12 @@ impl Actor for ServerActor {
         self.drain_signals();
 
         // Time out any pending login wait.
-        if let LoginState::Pending { ref deadline, .. } = self.login_state {
-            if Instant::now() >= *deadline {
-                if let LoginState::Pending { response, .. } =
-                    std::mem::replace(&mut self.login_state, LoginState::NotAttempted)
-                {
-                    let _ = response.send(Err(SoulseekRs::Timeout));
-                }
-            }
+        if let LoginState::Pending { ref deadline, .. } = self.login_state
+            && Instant::now() >= *deadline
+            && let LoginState::Pending { response, .. } =
+                std::mem::replace(&mut self.login_state, LoginState::NotAttempted)
+        {
+            let _ = response.send(Err(SoulseekRs::Timeout));
         }
 
         match &self.connection {

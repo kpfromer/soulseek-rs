@@ -132,22 +132,19 @@ impl DownloadManager {
         result: Result<String, crate::error::SoulseekRs>,
     ) {
         let status = match result {
-            Ok(ref path) => {
-                info!("Successfully downloaded to {}", path);
+            Ok(ref _path) => {
+                info!("Successfully downloaded to {}", _path);
                 DownloadStatus::Completed
             }
             Err(crate::error::SoulseekRs::DownloadCancelled) => DownloadStatus::Cancelled,
             Err(crate::error::SoulseekRs::DownloadTimedOut) => DownloadStatus::TimedOut,
-            Err(ref e) => {
-                error!("Download failed: {}", e);
+            Err(ref _e) => {
+                error!("Download failed: {}", _e);
                 DownloadStatus::Failed
             }
         };
-        if let Some(download) = self.downloads.get(&token) {
-            let _ = download.sender.send(status.clone());
-        }
-        if let Some(download) = self.downloads.get_mut(&token) {
-            download.status = status;
+        if let Some(download) = self.downloads.remove(&token) {
+            let _ = download.sender.send(status);
         }
         self.active_slots.remove(&token);
         self.try_dequeue_next();
@@ -175,10 +172,10 @@ impl DownloadManager {
             .collect();
         let any_failed = !failed_tokens.is_empty();
         for token in failed_tokens {
-            if let Some(d) = self.downloads.remove(&token) {
-                if let Some(h) = d.queue_timeout_handle {
-                    h.abort();
-                }
+            self.pending.retain(|t| *t != token);
+            if let Some(d) = self.downloads.remove(&token)
+                && let Some(h) = d.queue_timeout_handle {
+                h.abort();
             }
             self.active_slots.remove(&token);
         }
@@ -206,7 +203,7 @@ impl DownloadManager {
         let still_waiting = self
             .downloads
             .get(&token)
-            .map_or(false, |d| matches!(d.status, DownloadStatus::QueuedLocally));
+            .is_some_and(|d| matches!(d.status, DownloadStatus::QueuedLocally));
         if still_waiting {
             if let Some(download) = self.downloads.remove(&token) {
                 let _ = download.sender.send(DownloadStatus::TimedOut);
@@ -236,6 +233,7 @@ impl DownloadManager {
                 h.abort();
             }
             download.status = DownloadStatus::QueuedRemotely { place: None };
+            let _ = download.sender.send(DownloadStatus::QueuedRemotely { place: None });
         }
     }
 
@@ -250,6 +248,7 @@ impl DownloadManager {
                 h.abort();
             }
             download.status = DownloadStatus::QueuedRemotely { place: Some(place) };
+            let _ = download.sender.send(DownloadStatus::QueuedRemotely { place: Some(place) });
             let op_tx = self.op_tx.clone();
             let token = download.token;
             let handle = tokio::spawn(async move {
@@ -272,6 +271,7 @@ impl DownloadManager {
                 h.abort();
             }
             download.status = DownloadStatus::QueuedRemotely { place: None };
+            let _ = download.sender.send(DownloadStatus::QueuedRemotely { place: None });
             let op_tx = self.op_tx.clone();
             let token = download.token;
             let handle = tokio::spawn(async move {
@@ -288,12 +288,12 @@ impl DownloadManager {
         self.downloads.values().find(|d| d.peer_token == Some(token))
     }
 
-    /// Find the `DownloadToken` for a download from the given peer username.
+    /// Find the `DownloadToken` for an active (non-finished) download from the given peer username.
     /// Used as the pre-token fallback in `connect_f` failure reporting.
     pub fn find_initiating_token(&self, username: &str) -> Option<DownloadToken> {
         self.downloads
             .values()
-            .find(|d| d.username == username)
+            .find(|d| d.username == username && !d.is_finished())
             .map(|d| d.token)
     }
 
