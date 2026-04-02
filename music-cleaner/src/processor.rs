@@ -10,11 +10,9 @@ use walkdir::WalkDir;
 
 use crate::cli::Args;
 use crate::metadata::ResolvedTrackMetadata;
-use crate::{metadata, template};
+use crate::{bad_file, metadata, template};
 
-const AUDIO_EXTENSIONS: &[&str] = &[
-    "mp3", "flac", "ogg", "m4a", "wav", "aiff", "aif", "opus",
-];
+const AUDIO_EXTENSIONS: &[&str] = &["mp3", "flac", "ogg", "m4a", "wav", "aiff", "aif", "opus"];
 
 // ─── Entry point ────────────────────────────────────────────────────────────
 
@@ -38,6 +36,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     let mut succeeded: u64 = 0;
     let mut skipped: u64 = 0;
     let mut failed: u64 = 0;
+    let mut bad_files: u64 = 0;
     let mut unknown_count: u64 = 0;
 
     for file in &files {
@@ -46,12 +45,18 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
 
         match process_file(file, &args).await {
             Ok(ProcessOutcome::Done) => succeeded += 1,
+            Ok(ProcessOutcome::BadFile(e)) => {
+                pb.println(format!("  Bad audio file: {display}: {e:#}"));
+                bad_files += 1;
+            }
             Ok(ProcessOutcome::Skipped(reason)) => {
                 pb.println(format!("  Skipped {display}: {reason}"));
                 skipped += 1;
             }
             Ok(ProcessOutcome::RoutedToUnknownDirectory) => {
-                pb.println(format!("  No metadata for {display}: moved to unknown directory"));
+                pb.println(format!(
+                    "  No metadata for {display}: moved to unknown directory"
+                ));
                 unknown_count += 1;
             }
             Err(e) => {
@@ -65,6 +70,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
 
     pb.finish_with_message("Done");
     println!("\nProcessed {succeeded} file(s), skipped {skipped}, failed {failed}.");
+    println!("Found {bad_files} bad files.");
     if unknown_count > 0 {
         println!("{unknown_count} file(s) with no metadata copied to unknown directory.");
     }
@@ -78,6 +84,7 @@ enum ProcessOutcome {
     Done,
     Skipped(String),
     RoutedToUnknownDirectory,
+    BadFile(bad_file::AudioError),
 }
 
 enum LookupOutcome {
@@ -86,6 +93,15 @@ enum LookupOutcome {
 }
 
 async fn process_file(path: &Path, args: &Args) -> anyhow::Result<ProcessOutcome> {
+    {
+        let path_clone = path.to_path_buf();
+        if let Err(e) =
+            tokio::task::spawn_blocking(move || bad_file::check_file(&path_clone)).await?
+        {
+            return Ok(ProcessOutcome::BadFile(e));
+        }
+    }
+
     // ── 1. Already-processed guard ──────────────────────────────────────────
     let already_processed = metadata::is_already_processed(path)?;
     if already_processed && !args.overwrite_metadata {
@@ -102,13 +118,23 @@ async fn process_file(path: &Path, args: &Args) -> anyhow::Result<ProcessOutcome
 
     // ── 2. MusicBrainz lookup (with fallback to existing tags) ──────────────
     let display = path.display().to_string();
-    let lookup = match musicbrainz::lookup_track(path, &args.acoustid_api_key).await {
-        Ok(meta) => LookupOutcome::Resolved(ResolvedTrackMetadata::MusicBrainz(meta)),
-        Err(e) => {
-            eprintln!("  [warn] MusicBrainz lookup failed for {display}: {e}");
-            match metadata::read_existing_tags(path)? {
-                Some(tags) => LookupOutcome::Resolved(ResolvedTrackMetadata::ExistingFile(tags)),
-                None => LookupOutcome::NoMetadataAvailable,
+    let lookup = if args.no_musicbrainz {
+        match metadata::read_existing_tags(path)? {
+            Some(tags) => LookupOutcome::Resolved(ResolvedTrackMetadata::ExistingFile(tags)),
+            None => LookupOutcome::NoMetadataAvailable,
+        }
+    } else {
+        let api_key = args.acoustid_api_key.as_deref().unwrap_or_default();
+        match musicbrainz::lookup_track(path, api_key).await {
+            Ok(meta) => LookupOutcome::Resolved(ResolvedTrackMetadata::MusicBrainz(meta)),
+            Err(e) => {
+                eprintln!("  [warn] MusicBrainz lookup failed for {display}: {e}");
+                match metadata::read_existing_tags(path)? {
+                    Some(tags) => {
+                        LookupOutcome::Resolved(ResolvedTrackMetadata::ExistingFile(tags))
+                    }
+                    None => LookupOutcome::NoMetadataAvailable,
+                }
             }
         }
     };
@@ -134,13 +160,17 @@ async fn process_file(path: &Path, args: &Args) -> anyhow::Result<ProcessOutcome
     };
 
     // ── 3. Cover art (non-fatal, MusicBrainz only) ─────────────────────────
-    let art: Option<AlbumArt> = if let ResolvedTrackMetadata::MusicBrainz(m) = &track_meta {
-        match cover_art_archive::get_album_art(&m.release_mbid).await {
-            Ok(art) => Some(art),
-            Err(e) => {
-                eprintln!("  [warn] Cover art unavailable for {}: {e}", path.display());
-                None
+    let art: Option<AlbumArt> = if !args.no_musicbrainz {
+        if let ResolvedTrackMetadata::MusicBrainz(m) = &track_meta {
+            match cover_art_archive::get_album_art(&m.release_mbid).await {
+                Ok(art) => Some(art),
+                Err(e) => {
+                    eprintln!("  [warn] Cover art unavailable for {}: {e}", path.display());
+                    None
+                }
             }
+        } else {
+            None
         }
     } else {
         None
@@ -160,13 +190,12 @@ async fn process_file(path: &Path, args: &Args) -> anyhow::Result<ProcessOutcome
     };
 
     // ── 4. Write metadata to the source file in-place ───────────────────────
-    metadata::apply_metadata(path, &track_meta, art.as_ref(), already_processed)?;
+    if !args.no_musicbrainz {
+        metadata::apply_metadata(path, &track_meta, art.as_ref(), already_processed)?;
+    }
 
     // ── 5. Render output path ────────────────────────────────────────────────
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("bin");
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("bin");
 
     let relative = template::render(&args.template, &track_meta, ext);
 

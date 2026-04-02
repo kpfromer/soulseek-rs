@@ -68,8 +68,24 @@ pub struct Args {
     pub non_interactive: bool,
 
     /// AcoustID API key used for audio fingerprint lookups.
-    #[arg(long, env = "ACOUSTID_API_KEY", value_name = "KEY")]
-    pub acoustid_api_key: String,
+    ///
+    /// Required unless --no-musicbrainz is set.
+    #[arg(
+        long,
+        env = "ACOUSTID_API_KEY",
+        value_name = "KEY",
+        required_unless_present = "no_musicbrainz"
+    )]
+    pub acoustid_api_key: Option<String>,
+
+    /// Skip MusicBrainz/AcoustID lookups entirely.
+    ///
+    /// When set, audio file tags are never written. Files are still renamed
+    /// and copied/moved using whatever tags are already embedded in the file.
+    /// Files with no embedded tags are routed to the unknown directory as
+    /// usual. The --acoustid-api-key is not required when this flag is set.
+    #[arg(long)]
+    pub no_musicbrainz: bool,
 
     /// Destination directory for audio files that have no MusicBrainz match and no embedded tags.
     ///

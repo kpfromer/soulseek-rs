@@ -1,3 +1,4 @@
+mod bad_file;
 mod cli;
 mod error;
 mod metadata;

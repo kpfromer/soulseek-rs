@@ -12,11 +12,12 @@ anyhow = "1"
 chrono = { version = "0.4", features = ["clock"] }
 clap = { version = "4", features = ["derive", "env"] }
 cover-art-archive = { path = "../cover-art-archive" }
-image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 dialoguer = "0.11"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 indicatif = "0.17"
 lofty = "0.22"
 musicbrainz = { path = "../musicbrainz" }
+symphonia = { version = "0.5.5", features = ["mp3"] }
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 walkdir = "2"
