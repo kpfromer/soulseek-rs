@@ -71,14 +71,36 @@ pub fn render(template: &str, meta: &ResolvedTrackMetadata, source_ext: &str) ->
                 .unwrap_or_else(|| artist.clone());
             let year = m.album_year.map(|y| y.to_string()).unwrap_or_default();
             let track_number = format!("{:02}", m.track_number);
-            (m.track_title.clone(), m.album_title.clone(), artist, album_artist, track_number, year)
+            (
+                m.track_title.clone(),
+                m.album_title.clone(),
+                artist,
+                album_artist,
+                track_number,
+                year,
+            )
         }
         ResolvedTrackMetadata::ExistingFile(f) => {
-            let artist = f.track_artists.first().cloned().unwrap_or_else(|| "Unknown Artist".to_string());
-            let album_artist = f.album_artists.first().cloned().unwrap_or_else(|| artist.clone());
+            let artist = f
+                .track_artists
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "Unknown Artist".to_string());
+            let album_artist = f
+                .album_artists
+                .first()
+                .cloned()
+                .unwrap_or_else(|| artist.clone());
             let year = f.album_year.map(|y| y.to_string()).unwrap_or_default();
             let track_number = format!("{:02}", f.track_number.unwrap_or(0));
-            (f.track_title.clone(), f.album_title.clone(), artist, album_artist, track_number, year)
+            (
+                f.track_title.clone(),
+                f.album_title.clone(),
+                artist,
+                album_artist,
+                track_number,
+                year,
+            )
         }
     };
 
@@ -109,7 +131,7 @@ pub fn render(template: &str, meta: &ResolvedTrackMetadata, source_ext: &str) ->
 fn sanitize_component(s: &str) -> String {
     s.chars()
         .map(|c| match c {
-            ':' | '?' | '*' | '"' | '<' | '>' | '|' | '\\' => '-',
+            ':' | '?' | '*' | '"' | '<' | '>' | '|' | '\\' | '/' => '-',
             '\0' => ' ',
             other => other,
         })
@@ -130,7 +152,12 @@ mod tests {
     use musicbrainz::{Artist, TrackMetadata};
     use std::time::Duration;
 
-    fn make_mb_meta(title: &str, album: &str, artist: &str, track_number: i32) -> ResolvedTrackMetadata {
+    fn make_mb_meta(
+        title: &str,
+        album: &str,
+        artist: &str,
+        track_number: i32,
+    ) -> ResolvedTrackMetadata {
         ResolvedTrackMetadata::MusicBrainz(TrackMetadata {
             sha256: String::new(),
             track_title: title.to_string(),
@@ -152,7 +179,12 @@ mod tests {
         })
     }
 
-    fn make_file_meta(title: &str, album: &str, artist: &str, track_number: i32) -> ResolvedTrackMetadata {
+    fn make_file_meta(
+        title: &str,
+        album: &str,
+        artist: &str,
+        track_number: i32,
+    ) -> ResolvedTrackMetadata {
         ResolvedTrackMetadata::ExistingFile(FileTagMetadata {
             track_title: title.to_string(),
             track_number: Some(track_number),
@@ -173,21 +205,19 @@ mod tests {
     #[test]
     fn nested_template_creates_components() {
         let meta = make_mb_meta("My Song", "My Album", "My Artist", 7);
-        let path = render("{artist}/{album}/{track_number} - {title}.{ext}", &meta, "mp3");
-        assert_eq!(
-            path,
-            PathBuf::from("My Artist/My Album/07 - My Song.mp3")
+        let path = render(
+            "{artist}/{album}/{track_number} - {title}.{ext}",
+            &meta,
+            "mp3",
         );
+        assert_eq!(path, PathBuf::from("My Artist/My Album/07 - My Song.mp3"));
     }
 
     #[test]
     fn sanitizes_special_characters() {
         let meta = make_mb_meta("Song: Part 1", "Album?", "Artist*Name", 1);
         let path = render("{artist}/{album}/{title}.{ext}", &meta, "flac");
-        assert_eq!(
-            path,
-            PathBuf::from("Artist-Name/Album-/Song- Part 1.flac")
-        );
+        assert_eq!(path, PathBuf::from("Artist-Name/Album-/Song- Part 1.flac"));
     }
 
     #[test]
@@ -195,5 +225,19 @@ mod tests {
         let meta = make_file_meta("My Song", "My Album", "My Artist", 3);
         let path = render("{track_number} - {title}.{ext}", &meta, "flac");
         assert_eq!(path, PathBuf::from("03 - My Song.flac"));
+    }
+
+    #[test]
+    fn sanitizes_slashes() {
+        let meta = make_mb_meta("My Song (a/b)", "My Album (c/d)", "My Artist (e/f)", 3);
+        let path = render(
+            "{artist}/{album}/{track_number} - {title}.{ext}",
+            &meta,
+            "mp3",
+        );
+        assert_eq!(
+            path,
+            PathBuf::from("My Artist (e-f)/My Album (c-d)/03 - My Song (a-b).mp3")
+        );
     }
 }
