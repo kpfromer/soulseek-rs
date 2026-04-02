@@ -10,7 +10,7 @@ use walkdir::WalkDir;
 
 use crate::cli::Args;
 use crate::metadata::ResolvedTrackMetadata;
-use crate::{bad_file, metadata, template};
+use crate::{metadata, template};
 
 const AUDIO_EXTENSIONS: &[&str] = &["mp3", "flac", "ogg", "m4a", "wav", "aiff", "aif", "opus"];
 
@@ -84,7 +84,7 @@ enum ProcessOutcome {
     Done,
     Skipped(String),
     RoutedToUnknownDirectory,
-    BadFile(bad_file::AudioError),
+    BadFile(audio_check::AudioError),
 }
 
 enum LookupOutcome {
@@ -96,7 +96,7 @@ async fn process_file(path: &Path, args: &Args) -> anyhow::Result<ProcessOutcome
     {
         let path_clone = path.to_path_buf();
         if let Err(e) =
-            tokio::task::spawn_blocking(move || bad_file::check_file(&path_clone)).await?
+            tokio::task::spawn_blocking(move || audio_check::check_file(&path_clone)).await?
         {
             return Ok(ProcessOutcome::BadFile(e));
         }
