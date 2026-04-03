@@ -1,5 +1,5 @@
 [workspace]
-members = ["soulseek-rs", "song-rs", "musicbrainz", "downloader", "cover-art-archive", "music-cleaner"]
+members = ["audio-check", "soulseek-rs", "song-rs", "musicbrainz", "downloader", "cover-art-archive", "music-cleaner"]
 resolver = "2"
 
 [workspace.package]

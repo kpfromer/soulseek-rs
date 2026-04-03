@@ -1,4 +1,4 @@
-use crate::actor::server_actor::{ServerActor, ServerCommand};
+use crate::actor::server_actor::{ServerActor, ServerActorConfig, ServerCommand};
 use crate::path::SoulseekPath;
 use crate::search_rate_limiter::SlidingRateLimiter;
 use crate::token::{DownloadToken, SearchToken};
@@ -22,15 +22,17 @@ use tokio::sync::oneshot;
 mod connected_worker;
 mod context;
 mod download_handle;
+mod download_manager;
 mod download_slot;
 mod inner;
 pub(super) mod operation;
 mod settings;
 
 use connected_worker::ConnectedWorker;
+use download_manager::DownloadManager;
 pub use context::ClientContext;
 pub use download_handle::DownloadHandle;
-pub use inner::{ActiveConnection, ClientInner, ClientState, PendingDownload};
+pub use inner::{ActiveConnection, ClientInner, ClientState};
 pub use operation::ClientOperation;
 pub use settings::*;
 
@@ -120,22 +122,34 @@ impl Client {
             Arc::new(ClientContext::new(peer_registry))
         };
 
-        // Drain any pre-connect pending downloads into the worker's queue.
-        let pre_pending = {
+        // Drain any pre-connect pending downloads into the worker's download manager.
+        let (pre_pending_tokens, pre_downloads) = {
             let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-            guard.pending_downloads.drain(..).collect::<VecDeque<_>>()
+            let mut downloads: HashMap<DownloadToken, Download> = HashMap::new();
+            let tokens: VecDeque<DownloadToken> = guard
+                .pending_downloads
+                .drain(..)
+                .map(|d| {
+                    let token = d.token;
+                    downloads.insert(token, d);
+                    token
+                })
+                .collect();
+            (tokens, downloads)
         };
 
         // Spawn ServerActor first so we have its handle for the worker.
         let server_actor = ServerActor::new(
             self.settings.server_address.clone(),
             op_tx.clone(),
-            self.settings.listen_port,
-            self.settings.enable_listen,
-            self.settings.shared_folders,
-            self.settings.shared_files,
-            self.settings.tcp_keepalive_settings.clone(),
-            self.settings.reconnect_settings.clone(),
+            ServerActorConfig {
+                listen_port: self.settings.listen_port,
+                enable_listen: self.settings.enable_listen,
+                shared_folders: self.settings.shared_folders,
+                shared_files: self.settings.shared_files,
+                tcp_keepalive: self.settings.tcp_keepalive_settings.clone(),
+                reconnect_settings: self.settings.reconnect_settings.clone(),
+            },
         );
         let server_handle = actor_system.spawn(server_actor);
 
@@ -148,11 +162,14 @@ impl Client {
             context: context.clone(),
             cancellation_token: cancellation_token.clone(),
             server_handle: server_handle.clone(),
-            logged_in: false,
-            pending: pre_pending,
-            max_concurrent,
-            active_slots: HashMap::new(),
-            downloads: HashMap::new(),
+            downloads: DownloadManager::new(
+                op_tx.clone(),
+                context.clone(),
+                max_concurrent,
+                false,
+                pre_pending_tokens,
+                pre_downloads,
+            ),
             searches: HashMap::new(),
         };
         tokio::spawn(async move { worker.run().await });
@@ -181,7 +198,7 @@ impl Client {
                     result = Listen::start(listen_port, op_tx, context, own_username) => {
                         match result {
                             Ok(_) => info!("[listener] Listener started successfully"),
-                            Err(e) => error!("[listener] Failed to start listener: {}", e),
+                            Err(_e) => error!("[listener] Failed to start listener: {}", _e),
                         }
                     }
                 }
@@ -278,29 +295,38 @@ impl Client {
         let (download_sender, download_receiver) = mpsc::unbounded_channel::<DownloadStatus>();
         let cancel = Arc::new(AtomicBool::new(false));
 
-        let pending = PendingDownload {
-            filename: filename.clone(),
+        let download = Download {
             username: username.clone(),
+            filename: filename.clone(),
+            token,
+            peer_token: None,
             size,
             download_directory,
-            token,
-            status_sender: download_sender,
+            status: DownloadStatus::QueuedLocally,
+            sender: download_sender,
             cancel: cancel.clone(),
             progress_timeout,
+            queue_timeout_handle: None,
         };
-        let download = pending.to_download();
 
         let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
 
         let op_tx_opt = guard.active.as_ref().map(|a| a.op_tx.clone());
-        let handle = DownloadHandle::new(download_receiver, cancel, progress_timeout, recv_timeout, op_tx_opt, token);
+        let handle = DownloadHandle::new(
+            download_receiver,
+            cancel,
+            progress_timeout,
+            recv_timeout,
+            op_tx_opt,
+            token,
+        );
 
         if let Some(ref active) = guard.active {
             // Active connection — worker handles insertion and routing.
-            let _ = active.op_tx.send(ClientOperation::RequestDownload(pending));
+            let _ = active.op_tx.send(ClientOperation::RequestDownload(download.clone()));
         } else {
             // No active connection yet — buffer until connect().
-            guard.pending_downloads.push_back(pending);
+            guard.pending_downloads.push_back(download.clone());
         }
 
         Ok((download, handle))

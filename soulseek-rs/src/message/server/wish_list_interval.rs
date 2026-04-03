@@ -16,7 +16,7 @@ impl MessageHandler<ServerSignal> for WishListIntervalHandler {
     }
 
     fn handle(&self, message: &mut Message, _sender: UnboundedSender<ServerSignal>) {
-        let number = message.read_int32();
-        debug!("Wishlist search interval: {} in seconds", number);
+        let _number = message.read_int32();
+        debug!("Wishlist search interval: {} in seconds", _number);
     }
 }

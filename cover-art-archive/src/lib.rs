@@ -63,7 +63,7 @@ pub async fn get_album_art(release_mbid: &str) -> Result<AlbumArt, CoverArtArchi
                 200 => {
                     let extension = image_url
                         .split('.')
-                        .last()
+                        .next_back()
                         .ok_or(CoverArtArchiveError::UnexpectedError)?;
 
                     let bytes = image_response

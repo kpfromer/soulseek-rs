@@ -77,7 +77,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     std::fs::create_dir_all(&args.download_dir)?;
 
-    let mut client = Client::new(&args.username, &args.password);
+    let client = Client::new(&args.username, &args.password);
     let wanted = WantedFileTypes::from(args.file_type);
     let timeout = Duration::from_secs(args.timeout);
     let download_dir = args.download_dir.to_string_lossy().to_string();
@@ -136,7 +136,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let candidate_count = results.len();
         let mut succeeded = false;
 
-        'candidates: for (attempt, result) in results.iter().take(10).enumerate() {
+        'candidates: for (attempt, result) in results.iter().enumerate() {
             let attempt_label = format!(
                 "[{}/{}] {label}  (candidate {}/{})",
                 i + 1,
@@ -157,8 +157,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             while let Some(status) = handle.recv().await {
                 match status {
-                    DownloadStatus::Queued => {
-                        track_bar.set_message(format!("{attempt_label}  [queued]"));
+                    DownloadStatus::QueuedLocally => {
+                        track_bar.set_message(format!("{attempt_label}  [queued locally]"));
+                    }
+                    DownloadStatus::QueuedRemotely { place } => {
+                        track_bar.set_message(format!("{attempt_label}  [queued remotely: {:?}]", place));
                     }
                     DownloadStatus::InProgress {
                         bytes_downloaded,

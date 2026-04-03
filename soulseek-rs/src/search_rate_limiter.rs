@@ -81,7 +81,7 @@ impl SlidingRateLimiter {
                 while inner
                     .timestamps
                     .front()
-                    .map_or(false, |t| now.duration_since(*t) >= inner.window)
+                    .is_some_and(|t| now.duration_since(*t) >= inner.window)
                 {
                     inner.timestamps.pop_front();
                 }
@@ -89,7 +89,7 @@ impl SlidingRateLimiter {
                 let is_next = inner
                     .waiters
                     .front()
-                    .map_or(false, |w| Arc::ptr_eq(w, &notify));
+                    .is_some_and(|w| Arc::ptr_eq(w, &notify));
 
                 if is_next && inner.timestamps.len() < inner.max_tasks {
                     inner.timestamps.push_back(now);

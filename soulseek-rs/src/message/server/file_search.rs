@@ -13,12 +13,12 @@ impl MessageHandler<ServerSignal> for FileSearchHandler {
     }
     fn handle(&self, message: &mut Message, _sender: UnboundedSender<ServerSignal>) {
         debug!("Handling file search message");
-        let username = message.read_string();
-        let token = message.read_int32();
-        let query = message.read_string();
+        let _username = message.read_string();
+        let _token = message.read_int32();
+        let _query = message.read_string();
         info!(
             "Message search username:{}, token: {}, query: {}",
-            username, token, query
+            _username, _token, _query
         );
     }
 }

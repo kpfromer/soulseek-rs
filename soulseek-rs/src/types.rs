@@ -4,6 +4,7 @@ use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use tokio::sync::mpsc::UnboundedSender;
+use tokio::task::AbortHandle;
 
 use crate::token::{DownloadToken, PeerTransferToken, SearchToken};
 use crate::{error::Result, message::Message, path::SoulseekPath, utils::zlib::deflate};
@@ -115,12 +116,12 @@ pub struct Transfer {
     pub filename: SoulseekPath,
     pub size: u64,
 }
+
 /// Represents an active or completed download tracked by the worker.
 ///
-/// Created from a [`PendingDownload`] when a slot becomes available. Lives in
-/// `ConnectedWorker::downloads` for the lifetime of the transfer.
-///
-/// [`PendingDownload`]: crate::client::inner::PendingDownload
+/// Created from `Client::download()` and sent to the `ConnectedWorker` via
+/// `ClientOperation::RequestDownload`. Lives in `DownloadManager::downloads`
+/// for the lifetime of the transfer.
 #[derive(Debug, Clone)]
 pub struct Download {
     /// The Soulseek username of the peer providing the file.
@@ -152,6 +153,10 @@ pub struct Download {
     /// If set, the download is cancelled when no progress update arrives within
     /// this duration. Used to detect stalled transfers.
     pub progress_timeout: Option<Duration>,
+    /// Abort handle for the queue-response timeout task.
+    /// Aborted when the download transitions out of `QueuedLocally`
+    /// (i.e. when `TransferRequest` or a queue-position update is received).
+    pub queue_timeout_handle: Option<AbortHandle>,
 }
 
 impl Download {
@@ -188,7 +193,11 @@ impl Download {
 
 #[derive(Debug, Clone)]
 pub enum DownloadStatus {
-    Queued,
+    /// Waiting for a local concurrency slot; `QueueUpload` not yet sent to peer.
+    QueuedLocally,
+    /// `QueueUpload` sent; peer acknowledged and we are in their upload queue.
+    /// `place` is `Some` when a `PlaceInQueueResponse` has been received.
+    QueuedRemotely { place: Option<u32> },
     InProgress {
         bytes_downloaded: u64,
         total_bytes: u64,

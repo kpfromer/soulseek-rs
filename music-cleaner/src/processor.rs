@@ -3,16 +3,16 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use cover_art_archive::AlbumArt;
 use dialoguer::Select;
 use indicatif::{ProgressBar, ProgressStyle};
 use walkdir::WalkDir;
 
 use crate::cli::Args;
+use crate::metadata::ResolvedTrackMetadata;
 use crate::{metadata, template};
 
-const AUDIO_EXTENSIONS: &[&str] = &[
-    "mp3", "flac", "ogg", "m4a", "wav", "aiff", "aif", "opus",
-];
+const AUDIO_EXTENSIONS: &[&str] = &["mp3", "flac", "ogg", "m4a", "wav", "aiff", "aif", "opus"];
 
 // ─── Entry point ────────────────────────────────────────────────────────────
 
@@ -36,6 +36,8 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     let mut succeeded: u64 = 0;
     let mut skipped: u64 = 0;
     let mut failed: u64 = 0;
+    let mut bad_files: u64 = 0;
+    let mut unknown_count: u64 = 0;
 
     for file in &files {
         let display = file.display().to_string();
@@ -43,9 +45,19 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
 
         match process_file(file, &args).await {
             Ok(ProcessOutcome::Done) => succeeded += 1,
+            Ok(ProcessOutcome::BadFile(e)) => {
+                pb.println(format!("  Bad audio file: {display}: {e:#}"));
+                bad_files += 1;
+            }
             Ok(ProcessOutcome::Skipped(reason)) => {
                 pb.println(format!("  Skipped {display}: {reason}"));
                 skipped += 1;
+            }
+            Ok(ProcessOutcome::RoutedToUnknownDirectory) => {
+                pb.println(format!(
+                    "  No metadata for {display}: moved to unknown directory"
+                ));
+                unknown_count += 1;
             }
             Err(e) => {
                 pb.println(format!("  Error processing {display}: {e:#}"));
@@ -58,6 +70,10 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
 
     pb.finish_with_message("Done");
     println!("\nProcessed {succeeded} file(s), skipped {skipped}, failed {failed}.");
+    println!("Found {bad_files} bad files.");
+    if unknown_count > 0 {
+        println!("{unknown_count} file(s) with no metadata copied to unknown directory.");
+    }
 
     Ok(())
 }
@@ -67,9 +83,25 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
 enum ProcessOutcome {
     Done,
     Skipped(String),
+    RoutedToUnknownDirectory,
+    BadFile(audio_check::AudioError),
+}
+
+enum LookupOutcome {
+    Resolved(ResolvedTrackMetadata),
+    NoMetadataAvailable,
 }
 
 async fn process_file(path: &Path, args: &Args) -> anyhow::Result<ProcessOutcome> {
+    {
+        let path_clone = path.to_path_buf();
+        if let Err(e) =
+            tokio::task::spawn_blocking(move || audio_check::check_file(&path_clone)).await?
+        {
+            return Ok(ProcessOutcome::BadFile(e));
+        }
+    }
+
     // ── 1. Already-processed guard ──────────────────────────────────────────
     let already_processed = metadata::is_already_processed(path)?;
     if already_processed && !args.overwrite_metadata {
@@ -79,34 +111,93 @@ async fn process_file(path: &Path, args: &Args) -> anyhow::Result<ProcessOutcome
         ));
     }
 
-    // ── 2. MusicBrainz lookup ───────────────────────────────────────────────
-    let track_meta = musicbrainz::lookup_track(path, &args.acoustid_api_key).await?;
-
-    // ── 3. Cover art (non-fatal) ────────────────────────────────────────────
-    let art = match cover_art_archive::get_album_art(&track_meta.release_mbid).await {
-        Ok(art) => Some(art),
-        Err(e) => {
-            // Emit a warning line above the progress bar but continue.
-            eprintln!("  [warn] Cover art unavailable for {}: {e}", path.display());
-            None
-        }
-    };
-
-    // ── 4. Write metadata to the source file in-place ───────────────────────
-    metadata::apply_metadata(path, &track_meta, art.as_ref(), already_processed)?;
-
-    // ── 5. Render output path ────────────────────────────────────────────────
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("bin");
-
-    let relative = template::render(&args.template, &track_meta, ext);
-
     let output_root = args
         .output_dir
         .clone()
         .unwrap_or_else(|| path.parent().unwrap_or(Path::new(".")).to_path_buf());
+
+    // ── 2. MusicBrainz lookup (with fallback to existing tags) ──────────────
+    let display = path.display().to_string();
+    let lookup = if args.no_musicbrainz {
+        match metadata::read_existing_tags(path)? {
+            Some(tags) => LookupOutcome::Resolved(ResolvedTrackMetadata::ExistingFile(tags)),
+            None => LookupOutcome::NoMetadataAvailable,
+        }
+    } else {
+        let api_key = args.acoustid_api_key.as_deref().unwrap_or_default();
+        match musicbrainz::lookup_track(path, api_key).await {
+            Ok(meta) => LookupOutcome::Resolved(ResolvedTrackMetadata::MusicBrainz(meta)),
+            Err(e) => {
+                eprintln!("  [warn] MusicBrainz lookup failed for {display}: {e}");
+                match metadata::read_existing_tags(path)? {
+                    Some(tags) => {
+                        LookupOutcome::Resolved(ResolvedTrackMetadata::ExistingFile(tags))
+                    }
+                    None => LookupOutcome::NoMetadataAvailable,
+                }
+            }
+        }
+    };
+
+    // ── 2a. No metadata at all → route to unknown dir ───────────────────────
+    if let LookupOutcome::NoMetadataAvailable = lookup {
+        let unknown_dir = args
+            .unknown_dir
+            .clone()
+            .unwrap_or_else(|| output_root.join("unknown"));
+        fs::create_dir_all(&unknown_dir)?;
+        let dest = unknown_dir.join(path.file_name().unwrap_or_default());
+        if args.move_files {
+            fs::rename(path, &dest)?;
+        } else {
+            fs::copy(path, &dest)?;
+        }
+        return Ok(ProcessOutcome::RoutedToUnknownDirectory);
+    }
+
+    let LookupOutcome::Resolved(track_meta) = lookup else {
+        unreachable!()
+    };
+
+    // ── 3. Cover art (non-fatal, MusicBrainz only) ─────────────────────────
+    let art: Option<AlbumArt> = if !args.no_musicbrainz {
+        if let ResolvedTrackMetadata::MusicBrainz(m) = &track_meta {
+            match cover_art_archive::get_album_art(&m.release_mbid).await {
+                Ok(art) => Some(art),
+                Err(e) => {
+                    eprintln!("  [warn] Cover art unavailable for {}: {e}", path.display());
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // ── 3a. Optionally resize cover art ─────────────────────────────────────
+    let used_musicbrainz = matches!(&track_meta, ResolvedTrackMetadata::MusicBrainz(_));
+    let safe_to_resize = used_musicbrainz || !args.move_files;
+
+    let art = if safe_to_resize {
+        match (art, args.max_image_width, args.max_image_height) {
+            (Some(a), Some(max_w), Some(max_h)) => Some(maybe_resize_art(a, max_w, max_h)?),
+            (a, _, _) => a,
+        }
+    } else {
+        art
+    };
+
+    // ── 4. Write metadata to the source file in-place ───────────────────────
+    if !args.no_musicbrainz {
+        metadata::apply_metadata(path, &track_meta, art.as_ref(), already_processed)?;
+    }
+
+    // ── 5. Render output path ────────────────────────────────────────────────
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("bin");
+
+    let relative = template::render(&args.template, &track_meta, ext);
 
     let output_path = output_root.join(&relative);
 
@@ -121,13 +212,11 @@ async fn process_file(path: &Path, args: &Args) -> anyhow::Result<ProcessOutcome
     }
 
     // ── 8. Resolve file conflict ─────────────────────────────────────────────
-    if output_path.exists() {
-        if !resolve_file_conflict(&output_path, args)? {
-            return Ok(ProcessOutcome::Skipped(format!(
-                "output already exists: {}",
-                output_path.display()
-            )));
-        }
+    if output_path.exists() && !resolve_file_conflict(&output_path, args)? {
+        return Ok(ProcessOutcome::Skipped(format!(
+            "output already exists: {}",
+            output_path.display()
+        )));
     }
 
     // ── 9. Copy or move ──────────────────────────────────────────────────────
@@ -138,6 +227,25 @@ async fn process_file(path: &Path, args: &Args) -> anyhow::Result<ProcessOutcome
     }
 
     Ok(ProcessOutcome::Done)
+}
+
+// ─── Image resize ─────────────────────────────────────────────────────────────
+
+fn maybe_resize_art(art: AlbumArt, max_w: u32, max_h: u32) -> anyhow::Result<AlbumArt> {
+    let img = image::load_from_memory(&art.data)?;
+    if img.width() <= max_w && img.height() <= max_h {
+        return Ok(art);
+    }
+    let resized = img.resize(max_w, max_h, image::imageops::FilterType::Lanczos3);
+    let mut buf = Vec::new();
+    resized.write_to(
+        &mut std::io::Cursor::new(&mut buf),
+        image::ImageFormat::Jpeg,
+    )?;
+    Ok(AlbumArt {
+        data: buf,
+        extension: "jpg".to_string(),
+    })
 }
 
 // ─── Conflict resolution ─────────────────────────────────────────────────────

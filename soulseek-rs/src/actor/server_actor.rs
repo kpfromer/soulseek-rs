@@ -13,7 +13,9 @@ use crate::message::server::ParentSpeedRatioHandler;
 use crate::message::server::PrivilegedUsersHandler;
 use crate::message::server::RoomListHandler;
 use crate::message::server::WishListIntervalHandler;
-use crate::message::{Handlers, MessageType};
+use crate::message::Handlers;
+#[allow(unused_imports)]
+use crate::message::MessageType;
 use crate::message::{Message, MessageReader};
 use crate::peer::ConnectionType;
 use crate::peer::Peer;
@@ -54,6 +56,7 @@ impl std::fmt::Display for PeerAddress {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct UserMessage {
     id: u32,
@@ -149,6 +152,15 @@ enum LoginState {
     },
 }
 
+pub struct ServerActorConfig {
+    pub listen_port: u32,
+    pub enable_listen: bool,
+    pub shared_folders: u32,
+    pub shared_files: u32,
+    pub tcp_keepalive: KeepAliveSettings,
+    pub reconnect_settings: ReconnectSettings,
+}
+
 pub struct ServerActor {
     address: PeerAddress,
     listen_port: u32,
@@ -170,20 +182,15 @@ impl ServerActor {
     pub fn new(
         address: PeerAddress,
         client_channel: UnboundedSender<ClientOperation>,
-        listen_port: u32,
-        enable_listen: bool,
-        shared_folders: u32,
-        shared_files: u32,
-        tcp_keepalive: KeepAliveSettings,
-        reconnect_settings: ReconnectSettings,
+        config: ServerActorConfig,
     ) -> Self {
         let (signal_tx, signal_rx) = mpsc::unbounded_channel::<ServerSignal>();
         Self {
             address,
-            listen_port,
-            enable_listen,
-            shared_folders,
-            shared_files,
+            listen_port: config.listen_port,
+            enable_listen: config.enable_listen,
+            shared_folders: config.shared_folders,
+            shared_files: config.shared_files,
             connection: ServerConnection::Disconnected { reconnect_attempt: 0, last_disconnect: None },
             login_state: LoginState::NotAttempted,
             reader: MessageReader::new(),
@@ -191,8 +198,8 @@ impl ServerActor {
             signal_tx,
             signal_rx,
             queued_messages: Vec::new(),
-            reconnect_settings,
-            tcp_keepalive,
+            reconnect_settings: config.reconnect_settings,
+            tcp_keepalive: config.tcp_keepalive,
         }
     }
 
@@ -327,10 +334,10 @@ impl ServerActor {
                         Some(ClientOperation::ConnectToPeer(peer.clone()))
                     }
                     ConnectionType::D => None,
-                } {
-                    if let Err(e) = self.client_channel.send(op) {
-                        error!("[server] Failed to send ConnectToPeer: {}", e);
-                    }
+                }
+                    && let Err(_e) = self.client_channel.send(op)
+                {
+                    error!("[server] Failed to send ConnectToPeer: {}", _e);
                 }
             }
             ServerSignal::LoginStatus(logged_in) => {
@@ -349,8 +356,8 @@ impl ServerActor {
                 }
 
                 if logged_in {
-                    if let Err(e) = self.client_channel.send(ClientOperation::LoginSucceeded) {
-                        error!("[server] Failed to send LoginSucceeded: {}", e);
+                    if let Err(_e) = self.client_channel.send(ClientOperation::LoginSucceeded) {
+                        error!("[server] Failed to send LoginSucceeded: {}", _e);
                     }
 
                     self.queue_message(MessageFactory::build_shared_folders_message(
@@ -381,7 +388,7 @@ impl ServerActor {
                     username, host, port, obfuscation_type, obfuscated_port
                 );
 
-                if let Err(e) = self
+                if let Err(_e) = self
                     .client_channel
                     .send(ClientOperation::GetPeerAddressResponse {
                         username,
@@ -393,7 +400,7 @@ impl ServerActor {
                 {
                     error!(
                         "[server] Error forwarding GetPeerAddress response to client: {}",
-                        e
+                        _e
                     );
                 }
             }
@@ -440,14 +447,14 @@ impl ServerActor {
     }
 
     fn extract_and_process_messages(&mut self) {
-        let mut extracted_count = 0;
+        let mut _extracted_count = 0;
         loop {
             match self.reader.extract_message() {
                 Ok(Some(mut message)) => {
-                    extracted_count += 1;
+                    _extracted_count += 1;
                     trace!(
                         "[server] ← Message #{}: {:?}",
-                        extracted_count,
+                        _extracted_count,
                         message
                             .get_message_name(
                                 MessageType::Server,
@@ -497,9 +504,9 @@ impl ServerActor {
 
         let buf = message.get_buffer();
         match stream.try_write(&buf) {
-            Ok(n) if n == buf.len() => {}
-            Ok(n) => {
-                error!("[server] Partial write: {} of {} bytes", n, buf.len());
+            Ok(_n) if _n == buf.len() => {}
+            Ok(_n) => {
+                error!("[server] Partial write: {} of {} bytes", _n, buf.len());
             }
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                 warn!("[server] Write would block, message may be lost");
@@ -531,11 +538,11 @@ impl ServerActor {
             self.login_state = LoginState::LoggedIn { credentials };
         }
 
-        if let Err(e) = self
+        if let Err(_e) = self
             .client_channel
             .send(ClientOperation::ServerDisconnected)
         {
-            error!("[server] Failed to send ServerDisconnected: {}", e);
+            error!("[server] Failed to send ServerDisconnected: {}", _e);
         }
     }
 
@@ -601,7 +608,7 @@ impl ServerActor {
         handlers.register_handler(ConnectToPeerHandler);
 
         let dispatcher = Dispatcher {
-            inner: MessageDispatcher::new("server".into(), self.signal_tx.clone(), handlers),
+            inner: MessageDispatcher::new(self.signal_tx.clone(), handlers),
         };
 
         self.connection = ServerConnection::Connected { stream, dispatcher };
@@ -645,14 +652,14 @@ impl ServerActor {
                 max_delay,
                 max_attempts,
             } => {
-                if let Some(max) = max_attempts {
-                    if reconnect_attempt > *max {
-                        warn!(
-                            "[server] Max reconnect attempts ({}) reached, giving up",
-                            max
-                        );
-                        return;
-                    }
+                if let Some(max) = max_attempts
+                    && reconnect_attempt > *max
+                {
+                    warn!(
+                        "[server] Max reconnect attempts ({}) reached, giving up",
+                        max
+                    );
+                    return;
                 }
                 let exp = reconnect_attempt.saturating_sub(1);
                 let factor = 1u64.checked_shl(exp).unwrap_or(u64::MAX);
@@ -703,14 +710,12 @@ impl Actor for ServerActor {
         self.drain_signals();
 
         // Time out any pending login wait.
-        if let LoginState::Pending { ref deadline, .. } = self.login_state {
-            if Instant::now() >= *deadline {
-                if let LoginState::Pending { response, .. } =
-                    std::mem::replace(&mut self.login_state, LoginState::NotAttempted)
-                {
-                    let _ = response.send(Err(SoulseekRs::Timeout));
-                }
-            }
+        if let LoginState::Pending { ref deadline, .. } = self.login_state
+            && Instant::now() >= *deadline
+            && let LoginState::Pending { response, .. } =
+                std::mem::replace(&mut self.login_state, LoginState::NotAttempted)
+        {
+            let _ = response.send(Err(SoulseekRs::Timeout));
         }
 
         match &self.connection {

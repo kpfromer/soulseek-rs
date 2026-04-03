@@ -12,7 +12,7 @@ impl MessageHandler<PeerSignal> for UploadFailedHandler {
         46
     }
     fn handle(&self, message: &mut Message, _sender: UnboundedSender<PeerSignal>) {
-        let upload_failed = UploadFailed::new_from_message(message);
-        info!("Upload failed for ${}", upload_failed.filename);
+        let _upload_failed = UploadFailed::new_from_message(message);
+        info!("Upload failed for ${}", _upload_failed.filename);
     }
 }

@@ -7,6 +7,7 @@ use crate::message::peer::{
     TransferResponse, UploadFailedHandler,
 };
 use crate::message::server::MessageFactory;
+#[allow(unused_imports)]
 use crate::message::{Handlers, Message, MessageReader, MessageType};
 use crate::path::SoulseekPath;
 use crate::peer::Peer;
@@ -110,7 +111,6 @@ impl PeerActor {
         handlers.register_handler(PeerInit);
 
         self.dispatcher = Some(MessageDispatcher::new(
-            "peer".to_string(),
             self.signal_tx.clone(),
             handlers,
         ));
@@ -174,39 +174,50 @@ impl PeerActor {
                 allowed,
                 reason,
             } => {
-                let username = self.peer.username.clone();
+                let _username = self.peer.username.clone();
                 debug!(
                     "[peer:{}] transfer response token: {} allowed: {}",
-                    username, token, allowed
+                    _username, token, allowed
                 );
 
                 if !allowed {
-                    if let Some(reason_text) = reason {
-                        debug!(
-                            "[peer:{}] Transfer rejected: {} - token {}, waiting for TransferRequest...",
-                            username, reason_text, token
-                        );
+                    debug!(
+                        "[peer:{}] Transfer rejected: {:?} - token {}, resetting timeout...",
+                        _username, reason, token
+                    );
+                    if let Err(_e) = self.client_channel.send(ClientOperation::TransferRejected {
+                        token,
+                        reason,
+                    }) {
+                        error!("[peer:{}] Failed to send TransferRejected: {}", _username, _e);
                     }
                 } else {
                     debug!(
                         "[peer:{}] Transfer allowed, ready to connect with token {:}",
-                        username, token
+                        _username, token
                     );
-                    self.client_channel
-                        .send(ClientOperation::DownloadFromPeer(
-                            token,
-                            self.peer.clone(),
-                            allowed,
-                        ))
-                        .unwrap();
+                    if let Err(_e) = self.client_channel.send(ClientOperation::DownloadFromPeer(
+                        token,
+                        self.peer.clone(),
+                        allowed,
+                    )) {
+                        error!("[peer:{}] Failed to send DownloadFromPeer: {}", _username, _e);
+                    }
                 }
             }
             PeerSignal::PlaceInQueueResponse { filename, place } => {
-                let username = &self.peer.username;
+                let _username = self.peer.username.clone();
                 debug!(
                     "[peer:{}] Place in queue response - file: {}, place: {}",
-                    username, filename, place
+                    _username, filename, place
                 );
+                if let Err(_e) = self.client_channel.send(ClientOperation::QueuePositionUpdated {
+                    username: _username.clone(),
+                    filename,
+                    place,
+                }) {
+                    error!("[peer:{}] Failed to send QueuePositionUpdated: {}", _username, _e);
+                }
             }
             PeerSignal::SetUsername(username) => {
                 trace!("[peer:{}] SetUsername: {}", self.peer.username, username);
@@ -256,10 +267,10 @@ impl PeerActor {
                     );
                 }
                 Err(e) => {
-                    let username = self.peer.username.clone();
+                    let _username = self.peer.username.clone();
                     error!(
                         "[peer:{}] Error reading from peer: {} (kind: {:?}). Disconnecting.",
-                        username,
+                        _username,
                         e,
                         e.kind()
                     );
@@ -272,16 +283,16 @@ impl PeerActor {
     }
 
     fn extract_and_process_messages(&mut self) {
-        let username = self.peer.username.clone();
-        let mut extracted_count = 0;
+        let _username = self.peer.username.clone();
+        let mut _extracted_count = 0;
         loop {
             match self.reader.extract_message() {
                 Ok(Some(mut message)) => {
-                    extracted_count += 1;
+                    _extracted_count += 1;
                     trace!(
                         "[peer:{}] ← Message #{}: {:?}",
-                        username,
-                        extracted_count,
+                        _username,
+                        _extracted_count,
                         message
                             .get_message_name(MessageType::Peer, message.get_message_code() as u32)
                             .map_err(|e| e.to_string())
@@ -289,13 +300,13 @@ impl PeerActor {
                     if let Some(ref dispatcher) = self.dispatcher {
                         dispatcher.dispatch(&mut message);
                     } else {
-                        warn!("[peer:{}] No dispatcher available!", username);
+                        warn!("[peer:{}] No dispatcher available!", _username);
                     }
                 }
                 Err(e) => {
                     warn!(
                         "[peer:{}] Error extracting message: {}. Disconnecting peer.",
-                        username, e
+                        _username, e
                     );
                     self.disconnect(Some(e));
                     return;
@@ -318,10 +329,10 @@ impl PeerActor {
             }
         };
 
-        let username = self.peer.username.clone();
+        let _username = self.peer.username.clone();
         trace!(
             "[peer:{}] ➡ {:?}",
-            username,
+            _username,
             message
                 .get_message_name(
                     MessageType::Peer,
@@ -332,22 +343,22 @@ impl PeerActor {
 
         let buf = message.get_buffer();
         match stream.try_write(&buf) {
-            Ok(n) if n == buf.len() => {}
-            Ok(n) => {
+            Ok(_n) if _n == buf.len() => {}
+            Ok(_n) => {
                 error!(
                     "[peer:{}] Partial write: {} of {} bytes",
-                    username,
-                    n,
+                    _username,
+                    _n,
                     buf.len()
                 );
             }
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                warn!("[peer:{}] Write would block, message may be lost", username);
+                warn!("[peer:{}] Write would block, message may be lost", _username);
             }
             Err(e) => {
                 error!(
                     "[peer:{}] Error writing message: {}. Disconnecting.",
-                    username, e
+                    _username, e
                 );
                 self.disconnect(Some(e));
             }
@@ -357,16 +368,16 @@ impl PeerActor {
     fn disconnect(&mut self, error: Option<io::Error>) {
         debug!("[peer:{}] disconnect", self.peer.username);
         self.stream.take();
-        if let Err(e) = self.client_channel.send(ClientOperation::PeerDisconnected(
+        if let Err(_e) = self.client_channel.send(ClientOperation::PeerDisconnected(
             self.peer.username.clone(),
             error.map(Into::into),
         )) {
-            error!("Failed to send disconnect notification: {}", e);
+            error!("Failed to send disconnect notification: {}", _e);
         }
     }
 
     fn initiate_connection(&mut self) -> bool {
-        let username = self.peer.username.clone();
+        let _username = self.peer.username.clone();
         let host = self.peer.host.clone();
         let port = self.peer.port;
 
@@ -404,7 +415,7 @@ impl PeerActor {
             Err(e) => {
                 error!(
                     "[peer:{}] Invalid socket address {}:{} - {}",
-                    username, host, port, e
+                    _username, host, port, e
                 );
                 self.disconnect(Some(io::Error::new(io::ErrorKind::InvalidInput, e)));
                 false
@@ -430,7 +441,7 @@ impl PeerActor {
     }
 
     fn on_connection_established(&mut self) {
-        let username = self.peer.username.clone();
+        let _username = self.peer.username.clone();
         let token = self.peer.token.unwrap_or(PierceToken(0));
 
         let Some(ref stream) = self.stream else {
@@ -443,13 +454,13 @@ impl PeerActor {
                 Ok(_) => {
                     debug!(
                         "[peer:{}] Sent PierceFireWall handshake (token={})",
-                        username, token
+                        _username, token
                     );
                 }
                 Err(e) => {
                     error!(
                         "[peer:{}] Failed to send PierceFireWall handshake: {}",
-                        username, e
+                        _username, e
                     );
                     self.disconnect(Some(e));
                     return;

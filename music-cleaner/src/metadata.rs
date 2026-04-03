@@ -17,7 +17,26 @@ use lofty::tag::{Accessor, ItemKey, ItemValue, Tag, TagExt, TagItem};
 use musicbrainz::TrackMetadata;
 
 const PROCESSED_AT_KEY: &str = "KYLE_PROCESSED_AT";
+const SOURCE_KEY: &str = "KYLE_MUSICBRAINZ_SOURCE";
 const KYLE_PREFIX: &str = "KYLE_";
+
+// ─── Public types ────────────────────────────────────────────────────────────
+
+/// Metadata extracted from a file's existing embedded audio tags.
+pub struct FileTagMetadata {
+    pub track_title: String,
+    pub track_number: Option<i32>,
+    pub album_title: String,
+    pub album_year: Option<i32>,
+    pub track_artists: Vec<String>,
+    pub album_artists: Vec<String>,
+}
+
+/// The resolved source of metadata for a track.
+pub enum ResolvedTrackMetadata {
+    MusicBrainz(TrackMetadata),
+    ExistingFile(FileTagMetadata),
+}
 
 // ─── Public API ─────────────────────────────────────────────────────────────
 
@@ -39,7 +58,7 @@ pub fn is_already_processed(path: &Path) -> anyhow::Result<bool> {
 /// 1. All existing text tag fields are copied verbatim into `KYLE_`-prefixed
 ///    custom fields (e.g. the current `TITLE` becomes `KYLE_TITLE`).
 /// 2. A `KYLE_PROCESSED_AT` timestamp (RFC 3339) is added.
-/// 3. Standard MusicBrainz metadata is written over the main fields.
+/// 3. Standard metadata is written over the main fields (MusicBrainz variant only).
 /// 4. If `art` is provided, the front cover picture is replaced.
 ///
 /// # Re-run behaviour (when `already_processed` is `true`)
@@ -49,7 +68,7 @@ pub fn is_already_processed(path: &Path) -> anyhow::Result<bool> {
 /// always preserved.
 pub fn apply_metadata(
     path: &Path,
-    meta: &TrackMetadata,
+    meta: &ResolvedTrackMetadata,
     art: Option<&AlbumArt>,
     already_processed: bool,
 ) -> anyhow::Result<()> {
@@ -70,7 +89,22 @@ pub fn apply_metadata(
     // --- Metadata + art pass ---
     {
         let tag = tagged_file.primary_tag_mut().unwrap();
-        write_musicbrainz_tags(tag, meta);
+        match meta {
+            ResolvedTrackMetadata::MusicBrainz(m) => {
+                write_musicbrainz_tags(tag, m);
+                tag.insert_unchecked(TagItem::new(
+                    ItemKey::Unknown(SOURCE_KEY.to_string()),
+                    ItemValue::Text("musicbrainz".to_string()),
+                ));
+            }
+            ResolvedTrackMetadata::ExistingFile(_) => {
+                // Tags are already correct — only stamp the source marker.
+                tag.insert_unchecked(TagItem::new(
+                    ItemKey::Unknown(SOURCE_KEY.to_string()),
+                    ItemValue::Text("existing_tags".to_string()),
+                ));
+            }
+        }
         if let Some(art) = art {
             embed_cover_art(tag, art);
         }
@@ -81,6 +115,38 @@ pub fn apply_metadata(
     tag.save_to_path(path, WriteOptions::default())?;
 
     Ok(())
+}
+
+/// Attempt to read metadata from the file's existing embedded audio tags.
+///
+/// Returns `None` when no tag is found or the tag has no title.
+pub fn read_existing_tags(path: &Path) -> anyhow::Result<Option<FileTagMetadata>> {
+    let tagged_file = lofty::read_from_path(path)?;
+    let tag = tagged_file.primary_tag().or_else(|| tagged_file.first_tag());
+    let Some(tag) = tag else {
+        return Ok(None);
+    };
+
+    let title = tag.title().map(|c| c.into_owned()).unwrap_or_default();
+    if title.is_empty() {
+        return Ok(None);
+    }
+
+    let artist = tag.artist().map(|c| c.into_owned()).unwrap_or_default();
+    let album = tag.album().map(|c| c.into_owned()).unwrap_or_default();
+    let album_artist = tag
+        .get_string(&ItemKey::AlbumArtist)
+        .map(|s| s.to_owned())
+        .unwrap_or_else(|| artist.clone());
+
+    Ok(Some(FileTagMetadata {
+        track_title: title,
+        track_number: tag.track().map(|n| n as i32),
+        album_title: album,
+        album_year: tag.year().map(|y| y as i32),
+        track_artists: if artist.is_empty() { vec![] } else { vec![artist] },
+        album_artists: if album_artist.is_empty() { vec![] } else { vec![album_artist] },
+    }))
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────

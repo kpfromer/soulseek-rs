@@ -68,6 +68,39 @@ pub struct Args {
     pub non_interactive: bool,
 
     /// AcoustID API key used for audio fingerprint lookups.
-    #[arg(long, env = "ACOUSTID_API_KEY", value_name = "KEY")]
-    pub acoustid_api_key: String,
+    ///
+    /// Required unless --no-musicbrainz is set.
+    #[arg(
+        long,
+        env = "ACOUSTID_API_KEY",
+        value_name = "KEY",
+        required_unless_present = "no_musicbrainz"
+    )]
+    pub acoustid_api_key: Option<String>,
+
+    /// Skip MusicBrainz/AcoustID lookups entirely.
+    ///
+    /// When set, audio file tags are never written. Files are still renamed
+    /// and copied/moved using whatever tags are already embedded in the file.
+    /// Files with no embedded tags are routed to the unknown directory as
+    /// usual. The --acoustid-api-key is not required when this flag is set.
+    #[arg(long)]
+    pub no_musicbrainz: bool,
+
+    /// Destination directory for audio files that have no MusicBrainz match and no embedded tags.
+    ///
+    /// Defaults to an `unknown/` subdirectory within the output root.
+    /// Files placed here are never renamed — the original filename is preserved.
+    #[arg(long, value_name = "DIR")]
+    pub unknown_dir: Option<PathBuf>,
+
+    /// Maximum width for embedded cover art in pixels.
+    /// Larger images are scaled down, maintaining aspect ratio.
+    #[arg(long, value_name = "PIXELS")]
+    pub max_image_width: Option<u32>,
+
+    /// Maximum height for embedded cover art in pixels.
+    /// Larger images are scaled down, maintaining aspect ratio.
+    #[arg(long, value_name = "PIXELS")]
+    pub max_image_height: Option<u32>,
 }

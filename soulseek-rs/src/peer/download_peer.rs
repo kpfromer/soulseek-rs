@@ -12,7 +12,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::client::ClientOperation;
 use crate::error::SoulseekRs;
 use crate::message::server::MessageFactory;
-use crate::token::{DownloadToken, PeerTransferToken};
+use crate::token::PeerTransferToken;
 use crate::{error, trace};
 use crate::types::{Download, DownloadStatus};
 
@@ -250,7 +250,7 @@ impl DownloadPeer {
 
         trace!("[download_peer:{}] sent START_DOWNLOAD", self.username);
 
-        let total_bytes = Self::read_stream(
+        let _total_bytes = Self::read_stream(
             &self.username,
             &mut stream,
             &mut writer,
@@ -261,7 +261,7 @@ impl DownloadPeer {
 
         trace!(
             "[download_peer:{}] download_direct complete: {} bytes → {}",
-            self.username, total_bytes, path
+            self.username, _total_bytes, path
         );
 
         Ok((download, path))
@@ -363,7 +363,7 @@ impl DownloadPeer {
             }
         }
 
-        total_bytes += Self::read_stream_with_offset(
+        let _final_bytes = Self::read_stream_with_offset(
             &self.username,
             &mut stream,
             &mut writer,
@@ -378,7 +378,7 @@ impl DownloadPeer {
 
         trace!(
             "[download_peer:{}] download_pierced complete: {} bytes → {}",
-            self.username, total_bytes, path
+            self.username, total_bytes + _final_bytes, path
         );
 
         Ok((download, path))
@@ -395,7 +395,7 @@ impl DownloadPeer {
     }
 
     fn read_stream_with_offset(
-        username: &str,
+        _username: &str,
         stream: &mut TcpStream,
         writer: &mut io::BufWriter<fs::File>,
         download: &Download,
@@ -407,14 +407,14 @@ impl DownloadPeer {
         let mut last_data_time = Instant::now();
         let mut read_buffer = [0u8; READ_BUFFER_SIZE];
 
-        trace!("[download_peer:{}] reading stream data", username);
+        trace!("[download_peer:{}] reading stream data", _username);
 
         loop {
             match stream.read(&mut read_buffer) {
                 Ok(0) => {
                     trace!(
                         "[download_peer:{}] connection closed by peer, {} bytes read",
-                        username, total_bytes
+                        _username, total_bytes
                     );
                     break;
                 }
@@ -428,11 +428,11 @@ impl DownloadPeer {
 
                     // Check for manual cancellation after each chunk.
                     if download.cancel.load(Ordering::Relaxed) {
-                        trace!("[download_peer:{}] cancelled by caller", username);
+                        trace!("[download_peer:{}] cancelled by caller", _username);
                         return Err(DownloadError::Cancelled);
                     }
 
-                    if chunk_counter % PROGRESS_UPDATE_CHUNKS == 0 {
+                    if chunk_counter.is_multiple_of(PROGRESS_UPDATE_CHUNKS) {
                         let elapsed = last_update_time.elapsed().as_secs_f64();
                         let speed = if elapsed > 0.0 {
                             (PROGRESS_UPDATE_CHUNKS * READ_BUFFER_SIZE) as f64 / elapsed
@@ -456,17 +456,17 @@ impl DownloadPeer {
                 {
                     // The 1-second read timeout fired; check flags before retrying.
                     if download.cancel.load(Ordering::Relaxed) {
-                        trace!("[download_peer:{}] cancelled by caller (stalled)", username);
+                        trace!("[download_peer:{}] cancelled by caller (stalled)", _username);
                         return Err(DownloadError::Cancelled);
                     }
-                    if let Some(timeout) = download.progress_timeout {
-                        if last_update_time.elapsed() >= timeout {
-                            trace!(
-                                "[download_peer:{}] no progress for {:?}, cancelling",
-                                username, timeout
-                            );
-                            return Err(DownloadError::NoProgressTimeout);
-                        }
+                    if let Some(timeout) = download.progress_timeout
+                        && last_update_time.elapsed() >= timeout
+                    {
+                        trace!(
+                            "[download_peer:{}] no progress for {:?}, cancelling",
+                            _username, timeout
+                        );
+                        return Err(DownloadError::NoProgressTimeout);
                     }
                     if last_data_time.elapsed() >= STALL_TIMEOUT {
                         return Err(DownloadError::StreamReadError(io::Error::new(

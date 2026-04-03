@@ -83,7 +83,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Downloading...");
     while let Some(status) = handle.recv().await {
         match status {
-            DownloadStatus::Queued => println!("Queued..."),
+            DownloadStatus::QueuedLocally => println!("Queued locally..."),
+            DownloadStatus::QueuedRemotely { place } => println!("Queued remotely (place: {:?})...", place),
             DownloadStatus::InProgress {
                 bytes_downloaded,
                 total_bytes,

@@ -1,0 +1,8 @@
+[package]
+name = "audio-check"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+symphonia = { version = "0.5.5", features = ["mp3"] }
+thiserror = "2"

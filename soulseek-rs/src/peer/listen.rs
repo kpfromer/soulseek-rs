@@ -99,10 +99,10 @@ fn handle_peer_connection(
 ) {
     match context.client_context.peer_registry.register_peer(peer.clone(), Some(stream), Some(reader)) {
         Ok(_) => (),
-        Err(e) => {
+        Err(_e) => {
             error!(
                 "Failed to spawn peer actor for {:?}: {:?}",
-                peer.username, e
+                peer.username, _e
             );
         }
     }
@@ -126,8 +126,8 @@ async fn handle_incoming_connection(stream: TcpStream, context: ConnectionContex
     .await
     {
         Ok(Ok(msg)) => msg,
-        Ok(Err(e)) => {
-            error!("[listener:{peer_ip}:{peer_port}] Failed to read peer init message: {e}");
+        Ok(Err(_e)) => {
+            error!("[listener:{peer_ip}:{peer_port}] Failed to read peer init message: {_e}");
             return;
         }
         Err(_) => {
@@ -273,8 +273,8 @@ impl Listen {
                         handle_incoming_connection(stream, context).await;
                     });
                 }
-                Err(e) => {
-                    error!("[listener] Failed to accept connection: {}", e);
+                Err(_e) => {
+                    error!("[listener] Failed to accept connection: {}", _e);
                 }
             }
         }
