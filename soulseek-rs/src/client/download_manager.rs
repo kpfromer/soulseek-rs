@@ -5,15 +5,15 @@ use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 
 use super::download_slot::DownloadSlot;
-use crate::client::context::ClientContext;
 use crate::client::ClientOperation;
+use crate::client::context::ClientContext;
 use crate::path::SoulseekPath;
 use crate::token::{DownloadToken, PeerTransferToken};
 use crate::types::{Download, DownloadStatus, Transfer};
 use crate::{error, info, trace};
 
 /// How long to wait for a peer to respond to `QueueUpload` (first response or queue update).
-const QUEUE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(180);
+const QUEUE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Owns the download concurrency queue and all download lifecycle logic.
 ///
@@ -174,7 +174,8 @@ impl DownloadManager {
         for token in failed_tokens {
             self.pending.retain(|t| *t != token);
             if let Some(d) = self.downloads.remove(&token)
-                && let Some(h) = d.queue_timeout_handle {
+                && let Some(h) = d.queue_timeout_handle
+            {
                 h.abort();
             }
             self.active_slots.remove(&token);
@@ -223,9 +224,7 @@ impl DownloadManager {
         {
             trace!(
                 "[dm] TransferRequest: {} peer_token={} size={}",
-                download.token,
-                transfer.token,
-                transfer.size
+                download.token, transfer.token, transfer.size
             );
             download.peer_token = Some(transfer.token);
             download.size = transfer.size;
@@ -233,7 +232,9 @@ impl DownloadManager {
                 h.abort();
             }
             download.status = DownloadStatus::QueuedRemotely { place: None };
-            let _ = download.sender.send(DownloadStatus::QueuedRemotely { place: None });
+            let _ = download
+                .sender
+                .send(DownloadStatus::QueuedRemotely { place: None });
         }
     }
 
@@ -248,7 +249,9 @@ impl DownloadManager {
                 h.abort();
             }
             download.status = DownloadStatus::QueuedRemotely { place: Some(place) };
-            let _ = download.sender.send(DownloadStatus::QueuedRemotely { place: Some(place) });
+            let _ = download
+                .sender
+                .send(DownloadStatus::QueuedRemotely { place: Some(place) });
             let op_tx = self.op_tx.clone();
             let token = download.token;
             let handle = tokio::spawn(async move {
@@ -271,7 +274,9 @@ impl DownloadManager {
                 h.abort();
             }
             download.status = DownloadStatus::QueuedRemotely { place: None };
-            let _ = download.sender.send(DownloadStatus::QueuedRemotely { place: None });
+            let _ = download
+                .sender
+                .send(DownloadStatus::QueuedRemotely { place: None });
             let op_tx = self.op_tx.clone();
             let token = download.token;
             let handle = tokio::spawn(async move {
@@ -285,7 +290,9 @@ impl DownloadManager {
 
     /// Find a download by peer transfer token (for `DownloadFromPeer` / listener lookups).
     pub fn find_by_peer_token(&self, token: PeerTransferToken) -> Option<&Download> {
-        self.downloads.values().find(|d| d.peer_token == Some(token))
+        self.downloads
+            .values()
+            .find(|d| d.peer_token == Some(token))
     }
 
     /// Find the `DownloadToken` for an active (non-finished) download from the given peer username.

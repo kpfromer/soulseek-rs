@@ -10,7 +10,7 @@ use crate::client::ClientOperation;
 use crate::token::DownloadToken;
 use crate::types::DownloadStatus;
 
-const DEFAULT_RECV_TIMEOUT: Duration = Duration::from_secs(120);
+const DEFAULT_RECV_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// Handle returned by [`Client::download`] for receiving progress and cancelling a download.
 ///
