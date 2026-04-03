@@ -77,6 +77,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         file.size,
         "./downloads".to_string(),
         None,
+        None,
     )?;
 
     println!("Downloading...");

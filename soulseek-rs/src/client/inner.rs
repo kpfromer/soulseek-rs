@@ -5,14 +5,12 @@ use std::time::Duration;
 use crate::DownloadStatus;
 use crate::actor::server_actor::ServerMessage;
 use crate::actor::{ActorHandle, ActorSystem};
-use crate::client::ClientContext;
 use crate::client::ClientOperation;
 use crate::path::SoulseekPath;
 use crate::search_rate_limiter::SlidingRateLimiter;
 use crate::token::DownloadToken;
 use crate::types::Download;
 use std::sync::Arc;
-use std::sync::RwLock;
 use tokio::sync::mpsc::UnboundedSender;
 
 pub enum ClientState {
@@ -55,7 +53,6 @@ impl PendingDownload {
 /// (ServerActor handles auto-reconnect). Only cleared when a new connect() is initiated.
 pub struct ActiveConnection {
     pub server_handle: ActorHandle<ServerMessage>,
-    pub context: Arc<RwLock<ClientContext>>,
     /// Sender to the ConnectedWorker operations channel.
     pub op_tx: UnboundedSender<ClientOperation>,
     /// Actor system — used for shutdown.
