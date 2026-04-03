@@ -2,18 +2,18 @@ use crate::debug;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{
-    actor::server_actor::ServerMessage,
+    actor::server_actor::ServerSignal,
     message::{Message, MessageHandler},
 };
 
 pub struct PrivilegedUsersHandler;
 
-impl MessageHandler<ServerMessage> for PrivilegedUsersHandler {
+impl MessageHandler<ServerSignal> for PrivilegedUsersHandler {
     fn get_code(&self) -> u32 {
         69
     }
 
-    fn handle(&self, message: &mut Message, _sender: UnboundedSender<ServerMessage>) {
+    fn handle(&self, message: &mut Message, _sender: UnboundedSender<ServerSignal>) {
         let number = message.read_int32();
         debug!("Number of privileged users: {}", number);
     }

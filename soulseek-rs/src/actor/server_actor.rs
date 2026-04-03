@@ -1,4 +1,4 @@
-use crate::actor::{Actor, ActorHandle};
+use crate::actor::Actor;
 use crate::client::{ClientOperation, KeepAliveSettings, ReconnectSettings};
 use crate::dispatcher::MessageDispatcher;
 use crate::message::server::ConnectToPeerHandler;
@@ -86,11 +86,9 @@ impl UserMessage {
     }
 }
 
+/// Commands sent from external callers (client, connected_worker) into the actor.
 #[derive(Debug)]
-pub enum ServerMessage {
-    ProcessRead,
-    LoginStatus(bool),
-    SendMessage(Message),
+pub enum ServerCommand {
     Login {
         username: String,
         password: String,
@@ -100,10 +98,16 @@ pub enum ServerMessage {
         token: SearchToken,
         query: String,
     },
-    #[allow(dead_code)]
-    ConnectToPeer(Peer),
     PierceFirewall(PierceToken),
     GetPeerAddress(String),
+}
+
+/// Internal signals produced by wire message handlers or actor self-sends.
+pub(crate) enum ServerSignal {
+    ProcessRead,
+    LoginStatus(bool),
+    SendMessage(Message),
+    ConnectToPeer(Peer),
     GetPeerAddressResponse {
         username: String,
         host: String,
@@ -114,9 +118,7 @@ pub enum ServerMessage {
 }
 
 struct Dispatcher {
-    inner: MessageDispatcher<ServerMessage>,
-    receiver: UnboundedReceiver<ServerMessage>,
-    sender: UnboundedSender<ServerMessage>,
+    inner: MessageDispatcher<ServerSignal>,
 }
 
 enum ServerConnection {
@@ -127,7 +129,6 @@ enum ServerConnection {
     Connecting {
         stream: TcpStream,
         since: Instant,
-        /// Preserved from `Disconnected` so `disconnect_with_error` can increment it.
         reconnect_attempt: u32,
     },
     Connected {
@@ -143,7 +144,6 @@ enum LoginState {
         response: tokio::sync::oneshot::Sender<Result<bool, SoulseekRs>>,
         deadline: Instant,
     },
-    /// Login succeeded (or login was in progress when TCP dropped); credentials available for reconnect.
     LoggedIn {
         credentials: (String, String),
     },
@@ -153,12 +153,15 @@ pub struct ServerActor {
     address: PeerAddress,
     listen_port: u32,
     enable_listen: bool,
+    shared_folders: u32,
+    shared_files: u32,
     connection: ServerConnection,
     login_state: LoginState,
     reader: MessageReader,
     client_channel: UnboundedSender<ClientOperation>,
-    self_handle: Option<ActorHandle<ServerMessage>>,
-    queued_messages: Vec<ServerMessage>,
+    signal_tx: UnboundedSender<ServerSignal>,
+    signal_rx: UnboundedReceiver<ServerSignal>,
+    queued_messages: Vec<ServerCommand>,
     reconnect_settings: ReconnectSettings,
     tcp_keepalive: KeepAliveSettings,
 }
@@ -169,18 +172,24 @@ impl ServerActor {
         client_channel: UnboundedSender<ClientOperation>,
         listen_port: u32,
         enable_listen: bool,
+        shared_folders: u32,
+        shared_files: u32,
         tcp_keepalive: KeepAliveSettings,
         reconnect_settings: ReconnectSettings,
     ) -> Self {
+        let (signal_tx, signal_rx) = mpsc::unbounded_channel::<ServerSignal>();
         Self {
             address,
             listen_port,
             enable_listen,
+            shared_folders,
+            shared_files,
             connection: ServerConnection::Disconnected { reconnect_attempt: 0, last_disconnect: None },
             login_state: LoginState::NotAttempted,
             reader: MessageReader::new(),
             client_channel,
-            self_handle: None,
+            signal_tx,
+            signal_rx,
             queued_messages: Vec::new(),
             reconnect_settings,
             tcp_keepalive,
@@ -189,13 +198,6 @@ impl ServerActor {
 
     pub fn get_address(&self) -> &PeerAddress {
         &self.address
-    }
-
-    pub fn get_sender(&self) -> Option<&UnboundedSender<ServerMessage>> {
-        match &self.connection {
-            ServerConnection::Connected { dispatcher, .. } => Some(&dispatcher.sender),
-            _ => None,
-        }
     }
 
     fn current_reconnect_attempt(&self) -> u32 {
@@ -216,7 +218,6 @@ impl ServerActor {
             Ok(addrs) => addrs,
             Err(e) => {
                 error!("[server] Failed to resolve address: {}", e);
-
                 self.disconnect_with_error(io::Error::new(io::ErrorKind::InvalidInput, e));
                 return false;
             }
@@ -228,7 +229,6 @@ impl ServerActor {
             Some(addr) => {
                 match std::net::TcpStream::connect(addr) {
                     Ok(std_stream) => {
-                        // Apply TCP keepalive via socket2
                         let socket = socket2::Socket::from(std_stream);
                         if let KeepAliveSettings::Enabled {
                             idle,
@@ -280,47 +280,48 @@ impl ServerActor {
         }
     }
 
-    pub fn set_self_handle(&mut self, handle: ActorHandle<ServerMessage>) {
-        self.self_handle = Some(handle);
-    }
-
-    fn process_dispatcher_messages(&mut self) {
-        let messages: Vec<ServerMessage> =
-            if let ServerConnection::Connected { dispatcher, .. } = &mut self.connection {
-                let mut msgs = Vec::new();
-                while let Ok(msg) = dispatcher.receiver.try_recv() {
-                    msgs.push(msg);
-                }
-                msgs
-            } else {
-                Vec::new()
-            };
-
-        for msg in messages {
-            self.handle_message(msg);
+    fn drain_signals(&mut self) {
+        let signals: Vec<ServerSignal> = {
+            let mut sigs = Vec::new();
+            while let Ok(sig) = self.signal_rx.try_recv() {
+                sigs.push(sig);
+            }
+            sigs
+        };
+        for sig in signals {
+            self.handle_signal(sig);
         }
     }
 
-    pub fn file_search(&mut self, token: u32, query: &str) {
-        self.queue_message(MessageFactory::build_file_search_message(token, query));
-    }
-
-    fn handle_message(&mut self, msg: ServerMessage) {
-        if !matches!(self.connection, ServerConnection::Connected { .. }) {
-            match &msg {
-                ServerMessage::ProcessRead => {
-                    // Always process read operations
-                }
-                _ => {
-                    // Queue all other messages when not connected
-                    self.queued_messages.push(msg);
-                    return;
-                }
+    fn handle_command(&mut self, cmd: ServerCommand) {
+        match cmd {
+            ServerCommand::Login {
+                username,
+                password,
+                response,
+            } => {
+                self.queue_message(MessageFactory::build_login_message(&username, &password));
+                self.login_state = LoginState::Pending {
+                    credentials: (username, password),
+                    response,
+                    deadline: Instant::now() + Duration::from_secs(5),
+                };
+            }
+            ServerCommand::FileSearch { token, query } => {
+                self.queue_message(MessageFactory::build_file_search_message(token.0, &query));
+            }
+            ServerCommand::PierceFirewall(token) => {
+                self.queue_message(MessageFactory::build_pierce_firewall_message(token.0));
+            }
+            ServerCommand::GetPeerAddress(username) => {
+                self.queue_message(MessageFactory::build_get_peer_address(&username));
             }
         }
+    }
 
-        match msg {
-            ServerMessage::ConnectToPeer(peer) => {
+    fn handle_signal(&mut self, sig: ServerSignal) {
+        match sig {
+            ServerSignal::ConnectToPeer(peer) => {
                 if let Some(op) = match peer.connection_type {
                     ConnectionType::P | ConnectionType::F => {
                         Some(ClientOperation::ConnectToPeer(peer.clone()))
@@ -332,8 +333,7 @@ impl ServerActor {
                     }
                 }
             }
-            ServerMessage::LoginStatus(logged_in) => {
-                // Resolve the pending connect() caller and transition login state.
+            ServerSignal::LoginStatus(logged_in) => {
                 match std::mem::replace(&mut self.login_state, LoginState::NotAttempted) {
                     LoginState::Pending { credentials, response, .. } => {
                         if logged_in {
@@ -341,26 +341,22 @@ impl ServerActor {
                             self.login_state = LoginState::LoggedIn { credentials };
                         } else {
                             let _ = response.send(Err(SoulseekRs::AuthenticationFailed));
-                            // login_state stays NotAttempted — no reconnect
                         }
                     }
                     other => {
-                        // Reconnect path: no response to send, credentials already in LoggedIn.
                         self.login_state = other;
                     }
                 }
 
                 if logged_in {
-                    // reconnect_attempt / last_disconnect are in ServerConnection::Disconnected,
-                    // which we've already left — no manual reset needed.
-
-                    // Notify client that login succeeded (used for reconnect path)
                     if let Err(e) = self.client_channel.send(ClientOperation::LoginSucceeded) {
                         error!("[server] Failed to send LoginSucceeded: {}", e);
                     }
 
-                    // Post-login setup: tell the server about ourselves
-                    self.queue_message(MessageFactory::build_shared_folders_message(1, 499));
+                    self.queue_message(MessageFactory::build_shared_folders_message(
+                        self.shared_folders,
+                        self.shared_files,
+                    ));
                     self.queue_message(MessageFactory::build_no_parent_message());
                     self.queue_message(MessageFactory::build_set_status_message(2));
                     if self.enable_listen {
@@ -370,16 +366,10 @@ impl ServerActor {
                     }
                 }
             }
-            ServerMessage::PierceFirewall(token) => {
-                self.send_message(MessageFactory::build_pierce_firewall_message(token.0));
-            }
-            ServerMessage::SendMessage(message) => {
+            ServerSignal::SendMessage(message) => {
                 self.send_message(message);
             }
-            ServerMessage::GetPeerAddress(username) => {
-                self.send_message(MessageFactory::build_get_peer_address(&username));
-            }
-            ServerMessage::GetPeerAddressResponse {
+            ServerSignal::GetPeerAddressResponse {
                 username,
                 host,
                 port,
@@ -407,25 +397,8 @@ impl ServerActor {
                     );
                 }
             }
-            ServerMessage::ProcessRead => {
+            ServerSignal::ProcessRead => {
                 self.process_read();
-            }
-            ServerMessage::Login {
-                username,
-                password,
-                response,
-            } => {
-                self.queue_message(MessageFactory::build_login_message(&username, &password));
-
-                // Park the caller's oneshot; resolved when LoginStatus arrives or timed out.
-                self.login_state = LoginState::Pending {
-                    credentials: (username, password),
-                    response,
-                    deadline: Instant::now() + Duration::from_secs(5),
-                };
-            }
-            ServerMessage::FileSearch { token, query } => {
-                self.file_search(token.0, &query);
             }
         }
     }
@@ -440,11 +413,9 @@ impl ServerActor {
                 return;
             };
 
-            // Use try_read for non-blocking read on tokio TcpStream
             let mut temp_buffer = [0u8; 1024];
             match stream.try_read(&mut temp_buffer) {
                 Ok(0) => {
-                    // Connection closed
                     return;
                 }
                 Ok(n) => {
@@ -501,20 +472,11 @@ impl ServerActor {
             }
         }
 
-        self.process_dispatcher_messages();
+        self.drain_signals();
     }
 
     fn queue_message(&mut self, message: Message) {
-        if let ServerConnection::Connected { dispatcher, .. } = &self.connection {
-            let sender = &dispatcher.sender;
-            match sender.send(ServerMessage::SendMessage(message)) {
-                Ok(_) => {}
-                Err(e) => error!("Failed to send: {}", e),
-            }
-        } else {
-            self.queued_messages
-                .push(ServerMessage::SendMessage(message));
-        }
+        let _ = self.signal_tx.send(ServerSignal::SendMessage(message));
     }
 
     fn send_message(&mut self, message: Message) {
@@ -537,11 +499,9 @@ impl ServerActor {
         match stream.try_write(&buf) {
             Ok(n) if n == buf.len() => {}
             Ok(n) => {
-                // Partial write - for now treat as error
                 error!("[server] Partial write: {} of {} bytes", n, buf.len());
             }
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                // TODO: buffer for later write
                 warn!("[server] Write would block, message may be lost");
             }
             Err(e) => {
@@ -554,7 +514,6 @@ impl ServerActor {
     fn disconnect_with_error(&mut self, _error: io::Error) {
         debug!("[server] disconnect");
 
-        // Only transition if we were previously connected or connecting.
         let new_reconnect_attempt = match &self.connection {
             ServerConnection::Connected { .. } => 1,
             ServerConnection::Connecting { reconnect_attempt, .. } => reconnect_attempt + 1,
@@ -565,7 +524,6 @@ impl ServerActor {
             last_disconnect: Some(Instant::now()),
         };
 
-        // Cancel any pending connect() caller, preserving credentials for reconnect.
         if let LoginState::Pending { credentials, response, .. } =
             std::mem::replace(&mut self.login_state, LoginState::NotAttempted)
         {
@@ -595,23 +553,18 @@ impl ServerActor {
             return;
         }
 
-        // Since std::net::TcpStream::connect() is blocking and succeeded,
-        // the connection is established once we have a stream.
-        // Try a zero-byte read to verify the connection is still alive.
         let ServerConnection::Connecting { ref stream, .. } = self.connection else {
             return;
         };
         let mut buf = [0u8; 1];
         match stream.try_read(&mut buf) {
             Ok(_) => {
-                // Got data or EOF - either way, connection was established
                 if buf[0] != 0 {
                     self.reader.push_bytes(&buf[..1]);
                 }
                 self.on_connection_established();
             }
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                // No data yet but socket is ready - connection established
                 self.on_connection_established();
             }
             Err(e) => {
@@ -634,15 +587,6 @@ impl ServerActor {
             }
         };
 
-        let (dispatcher_sender, dispatcher_receiver) = mpsc::unbounded_channel::<ServerMessage>();
-
-        if let Err(e) = self
-            .client_channel
-            .send(ClientOperation::SetServerSender(dispatcher_sender.clone()))
-        {
-            error!("[server] Failed to send SetServerSender: {}", e);
-        }
-
         let mut handlers = Handlers::new();
         handlers.register_handler(LoginHandler);
         handlers.register_handler(RoomListHandler);
@@ -657,9 +601,7 @@ impl ServerActor {
         handlers.register_handler(ConnectToPeerHandler);
 
         let dispatcher = Dispatcher {
-            inner: MessageDispatcher::new("server".into(), dispatcher_sender.clone(), handlers),
-            receiver: dispatcher_receiver,
-            sender: dispatcher_sender,
+            inner: MessageDispatcher::new("server".into(), self.signal_tx.clone(), handlers),
         };
 
         self.connection = ServerConnection::Connected { stream, dispatcher };
@@ -672,19 +614,15 @@ impl ServerActor {
         }
 
         let queued = std::mem::take(&mut self.queued_messages);
-        for msg in queued {
-            self.handle_message(msg);
+        for cmd in queued {
+            self.handle_command(cmd);
         }
 
-        if let Some(ref handle) = self.self_handle {
-            handle.send(ServerMessage::ProcessRead).ok();
-        }
-
+        self.signal_tx.send(ServerSignal::ProcessRead).ok();
         self.process_read();
     }
 
     fn maybe_reconnect(&mut self) {
-        // Only reconnect after a successful login (credentials stored in LoggedIn state).
         if !matches!(self.login_state, LoginState::LoggedIn { .. }) {
             return;
         }
@@ -716,7 +654,6 @@ impl ServerActor {
                         return;
                     }
                 }
-                // Exponential backoff: min_delay * 2^(attempt-1), capped at max_delay
                 let exp = reconnect_attempt.saturating_sub(1);
                 let factor = 1u64.checked_shl(exp).unwrap_or(u64::MAX);
                 let delay_secs = (min_delay.as_secs()).saturating_mul(factor);
@@ -738,10 +675,14 @@ impl ServerActor {
 }
 
 impl Actor for ServerActor {
-    type Message = ServerMessage;
+    type Message = ServerCommand;
 
     fn handle(&mut self, msg: Self::Message) {
-        self.handle_message(msg);
+        if !matches!(self.connection, ServerConnection::Connected { .. }) {
+            self.queued_messages.push(msg);
+            return;
+        }
+        self.handle_command(msg);
     }
 
     fn on_start(&mut self) {
@@ -754,10 +695,13 @@ impl Actor for ServerActor {
 
     fn on_stop(&mut self) {
         trace!("[server] actor stopping");
-        self.connection = ServerConnection::Disconnected { reconnect_attempt: 0, last_disconnect: None };
+        self.connection =
+            ServerConnection::Disconnected { reconnect_attempt: 0, last_disconnect: None };
     }
 
     fn tick(&mut self) {
+        self.drain_signals();
+
         // Time out any pending login wait.
         if let LoginState::Pending { ref deadline, .. } = self.login_state {
             if Instant::now() >= *deadline {
@@ -765,7 +709,6 @@ impl Actor for ServerActor {
                     std::mem::replace(&mut self.login_state, LoginState::NotAttempted)
                 {
                     let _ = response.send(Err(SoulseekRs::Timeout));
-                    // login_state stays NotAttempted — login protocol timed out, don't reconnect
                 }
             }
         }

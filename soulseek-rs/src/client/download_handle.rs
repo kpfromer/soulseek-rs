@@ -3,11 +3,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::time::sleep;
 
+use crate::client::ClientOperation;
+use crate::token::DownloadToken;
 use crate::types::DownloadStatus;
 
-const DEFAULT_RECV_TIMEOUT: Duration = Duration::from_mins(10);
+const DEFAULT_RECV_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Handle returned by [`Client::download`] for receiving progress and cancelling a download.
 ///
@@ -20,6 +23,9 @@ pub struct DownloadHandle {
     progress_timeout: Option<Duration>,
     /// Used only by [`recv`](Self::recv) — cancels the wait if no status update arrives.
     recv_timeout: Option<Duration>,
+    /// Sender to the worker for cancellation cleanup (None if disconnected at download time).
+    op_tx: Option<UnboundedSender<ClientOperation>>,
+    token: DownloadToken,
 }
 
 impl DownloadHandle {
@@ -28,12 +34,16 @@ impl DownloadHandle {
         cancel: Arc<AtomicBool>,
         progress_timeout: Option<Duration>,
         recv_timeout: Option<Duration>,
+        op_tx: Option<UnboundedSender<ClientOperation>>,
+        token: DownloadToken,
     ) -> Self {
         Self {
             receiver,
             cancel,
             progress_timeout,
             recv_timeout,
+            op_tx,
+            token,
         }
     }
 
@@ -69,5 +79,8 @@ impl DownloadHandle {
 impl Drop for DownloadHandle {
     fn drop(&mut self) {
         self.cancel.store(true, Ordering::Relaxed);
+        if let Some(ref tx) = self.op_tx {
+            let _ = tx.send(ClientOperation::CancelDownload(self.token));
+        }
     }
 }

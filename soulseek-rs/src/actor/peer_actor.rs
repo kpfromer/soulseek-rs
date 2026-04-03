@@ -1,6 +1,6 @@
-use crate::actor::{Actor, ActorHandle, ConnectionState};
+use crate::actor::{Actor, ConnectionState};
 use crate::client::ClientOperation;
-use crate::token::{DownloadToken, PierceToken};
+use crate::token::{PeerTransferToken, PierceToken};
 use crate::dispatcher::MessageDispatcher;
 use crate::message::peer::{
     FileSearchResponse, GetShareFileList, PeerInit, PlaceInQueueResponse, TransferRequest,
@@ -14,20 +14,26 @@ use crate::types::{Download, SearchResult, Transfer};
 use crate::{debug, error, trace, warn};
 
 use std::io;
-use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 
 #[derive(Debug)]
-pub enum PeerMessage {
+pub enum PeerCommand {
+    QueueUpload(SoulseekPath),
+    RequestTransfer(Download),
+}
+
+pub(crate) enum PeerSignal {
+    ProcessRead,
+    ConnectionEstablished(TcpStream),
+    ConnectionFailed(io::Error),
     SendMessage(Message),
     FileSearchResult(SearchResult),
     TransferRequest(Transfer),
-    UploadFailed(String, SoulseekPath),
     TransferResponse {
-        token: DownloadToken,
+        token: PeerTransferToken,
         allowed: bool,
         reason: Option<String>,
     },
@@ -36,26 +42,23 @@ pub enum PeerMessage {
         place: u32,
     },
     SetUsername(String),
-    QueueUpload(SoulseekPath),
-    RequestTransfer(Download),
-    ProcessRead,
-    ConnectionEstablished(TcpStream),
-    ConnectionFailed(io::Error),
 }
 
 pub struct PeerActor {
-    peer: Arc<RwLock<Peer>>,
+    peer: Peer,
     stream: Option<TcpStream>,
     connection_state: ConnectionState,
     reader: MessageReader,
     client_channel: UnboundedSender<ClientOperation>,
-    self_handle: Option<ActorHandle<PeerMessage>>,
-    dispatcher: Option<MessageDispatcher<PeerMessage>>,
-    dispatcher_receiver: Option<UnboundedReceiver<PeerMessage>>,
-    queued_messages: Vec<PeerMessage>,
+    signal_tx: UnboundedSender<PeerSignal>,
+    signal_rx: UnboundedReceiver<PeerSignal>,
+    dispatcher: Option<MessageDispatcher<PeerSignal>>,
+    queued_commands: Vec<PeerCommand>,
     #[allow(dead_code)]
     own_username: String,
     needs_handshake: bool,
+    shared_folders: u32,
+    shared_files: u32,
 }
 
 impl PeerActor {
@@ -65,6 +68,8 @@ impl PeerActor {
         reader: Option<MessageReader>,
         client_channel: UnboundedSender<ClientOperation>,
         own_username: String,
+        shared_folders: u32,
+        shared_files: u32,
     ) -> Self {
         let needs_handshake = stream.is_none();
         let connection_state = if stream.is_some() {
@@ -72,89 +77,86 @@ impl PeerActor {
         } else {
             ConnectionState::Disconnected
         };
+        let (signal_tx, signal_rx) = mpsc::unbounded_channel::<PeerSignal>();
 
         Self {
-            peer: Arc::new(RwLock::new(peer)),
+            peer,
             stream,
             connection_state,
             reader: reader.unwrap_or_default(),
             client_channel,
-            self_handle: None,
+            signal_tx,
+            signal_rx,
             dispatcher: None,
-            dispatcher_receiver: None,
-            queued_messages: Vec::new(),
+            queued_commands: Vec::new(),
             own_username,
             needs_handshake,
+            shared_folders,
+            shared_files,
         }
     }
 
-    pub fn set_self_handle(&mut self, handle: ActorHandle<PeerMessage>) {
-        self.self_handle = Some(handle);
-    }
-
     fn initialize_dispatcher(&mut self) {
-        let (dispatcher_sender, dispatcher_receiver) = mpsc::unbounded_channel::<PeerMessage>();
-
-        self.dispatcher_receiver = Some(dispatcher_receiver);
-
         let mut handlers = Handlers::new();
         handlers.register_handler(FileSearchResponse);
         handlers.register_handler(TransferRequest);
         handlers.register_handler(TransferResponse);
-        handlers.register_handler(GetShareFileList);
+        handlers.register_handler(GetShareFileList {
+            shared_folders: self.shared_folders,
+            shared_files: self.shared_files,
+        });
         handlers.register_handler(UploadFailedHandler);
         handlers.register_handler(PlaceInQueueResponse);
         handlers.register_handler(PeerInit);
 
         self.dispatcher = Some(MessageDispatcher::new(
             "peer".to_string(),
-            dispatcher_sender,
+            self.signal_tx.clone(),
             handlers,
         ));
     }
 
-    fn process_dispatcher_messages(&mut self) {
-        let messages: Vec<PeerMessage> =
-            self.dispatcher_receiver
-                .as_mut()
-                .map_or_else(Vec::new, |receiver| {
-                    let mut msgs = Vec::new();
-                    while let Ok(msg) = receiver.try_recv() {
-                        msgs.push(msg);
-                    }
-                    msgs
-                });
-
-        for msg in messages {
-            self.handle_message(msg);
+    fn drain_signals(&mut self) {
+        let signals: Vec<PeerSignal> = {
+            let mut sigs = Vec::new();
+            while let Ok(sig) = self.signal_rx.try_recv() {
+                sigs.push(sig);
+            }
+            sigs
+        };
+        for sig in signals {
+            self.handle_signal(sig);
         }
     }
 
-    fn handle_message(&mut self, msg: PeerMessage) {
-        if matches!(self.connection_state, ConnectionState::Connecting { .. }) {
-            match &msg {
-                PeerMessage::SetUsername(_)
-                | PeerMessage::ProcessRead
-                | PeerMessage::ConnectionEstablished(_)
-                | PeerMessage::ConnectionFailed(_) => {}
-                _ => {
-                    self.queued_messages.push(msg);
-                    return;
-                }
-            }
-        }
-
-        match msg {
-            PeerMessage::SendMessage(message) => {
+    fn handle_command(&mut self, cmd: PeerCommand) {
+        match cmd {
+            PeerCommand::QueueUpload(filename) => {
+                let message = MessageFactory::build_queue_upload_message(filename.as_str());
                 self.send_message(message);
             }
-            PeerMessage::FileSearchResult(file_search) => {
+            PeerCommand::RequestTransfer(download) => {
+                let message = MessageFactory::build_transfer_request_message(
+                    download.filename.as_str(),
+                    download.token.0,
+                );
+                self.send_message(message);
+            }
+        }
+    }
+
+    fn handle_signal(&mut self, sig: PeerSignal) {
+        match sig {
+            PeerSignal::SendMessage(message) => {
+                self.send_message(message);
+            }
+            PeerSignal::FileSearchResult(file_search) => {
                 self.client_channel
                     .send(ClientOperation::SearchResult(file_search))
                     .unwrap();
             }
-            PeerMessage::TransferRequest(transfer) => {
-                let username = self.peer.read().unwrap().username.clone();
+            PeerSignal::TransferRequest(transfer) => {
+                let username = self.peer.username.clone();
                 debug!("[peer:{}] TransferRequest for {}", username, transfer.token);
 
                 self.client_channel
@@ -165,22 +167,14 @@ impl PeerActor {
                     .unwrap();
 
                 let transfer_response = MessageFactory::build_transfer_response_message(transfer);
-
-                if let Some(ref handle) = self.self_handle
-                    && let Err(e) = handle.send(PeerMessage::SendMessage(transfer_response))
-                {
-                    error!(
-                        "[peer:{}] Failed to send TransferResponse message: {}",
-                        username, e
-                    );
-                }
+                self.send_message(transfer_response);
             }
-            PeerMessage::TransferResponse {
+            PeerSignal::TransferResponse {
                 token,
                 allowed,
                 reason,
             } => {
-                let username = self.peer.read().unwrap().username.clone();
+                let username = self.peer.username.clone();
                 debug!(
                     "[peer:{}] transfer response token: {} allowed: {}",
                     username, token, allowed
@@ -201,53 +195,33 @@ impl PeerActor {
                     self.client_channel
                         .send(ClientOperation::DownloadFromPeer(
                             token,
-                            self.peer.read().unwrap().clone(),
+                            self.peer.clone(),
                             allowed,
                         ))
                         .unwrap();
                 }
             }
-            PeerMessage::PlaceInQueueResponse { filename, place } => {
-                let username = self.peer.read().unwrap().username.clone();
+            PeerSignal::PlaceInQueueResponse { filename, place } => {
+                let username = &self.peer.username;
                 debug!(
                     "[peer:{}] Place in queue response - file: {}, place: {}",
                     username, filename, place
                 );
             }
-            PeerMessage::SetUsername(username) => {
-                trace!(
-                    "[peer:{}] SetUsername: {}",
-                    self.peer.read().unwrap().username,
-                    username
-                );
-                self.peer.write().unwrap().username = username;
+            PeerSignal::SetUsername(username) => {
+                trace!("[peer:{}] SetUsername: {}", self.peer.username, username);
+                self.peer.username = username;
             }
-            PeerMessage::QueueUpload(filename) => {
-                let message = MessageFactory::build_queue_upload_message(filename.as_str());
-                self.send_message(message);
-            }
-            PeerMessage::RequestTransfer(download) => {
-                let message = MessageFactory::build_transfer_request_message(
-                    download.filename.as_str(),
-                    download.token.0,
-                );
-                self.send_message(message);
-            }
-            PeerMessage::ProcessRead => {
+            PeerSignal::ProcessRead => {
                 self.process_read();
             }
-            PeerMessage::ConnectionEstablished(stream) => {
+            PeerSignal::ConnectionEstablished(stream) => {
                 self.stream = Some(stream);
                 self.connection_state = ConnectionState::Connected;
                 self.on_connection_established();
             }
-            PeerMessage::ConnectionFailed(e) => {
-                self.disconnect_with_error(e);
-            }
-            PeerMessage::UploadFailed(username, filename) => {
-                self.client_channel
-                    .send(ClientOperation::UploadFailed(username, filename))
-                    .unwrap();
+            PeerSignal::ConnectionFailed(e) => {
+                self.disconnect(Some(e));
             }
         }
     }
@@ -266,7 +240,9 @@ impl PeerActor {
             let mut temp_buffer = [0u8; 1024];
             match stream.try_read(&mut temp_buffer) {
                 Ok(0) => {
-                    // Connection closed
+                    // EOF — remote closed the connection cleanly.
+                    trace!("[peer:{}] EOF, remote closed connection", self.peer.username);
+                    self.disconnect(None);
                     return;
                 }
                 Ok(n) => {
@@ -274,21 +250,20 @@ impl PeerActor {
                 }
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {}
                 Err(ref e) if e.kind() == io::ErrorKind::TimedOut => {
-                    let peer_lock = self.peer.read().unwrap();
                     debug!(
                         "Read operation timed out for peer actor {:}:{:}",
-                        peer_lock.host, peer_lock.port
+                        self.peer.host, self.peer.port
                     );
                 }
                 Err(e) => {
-                    let username = self.peer.read().unwrap().username.clone();
+                    let username = self.peer.username.clone();
                     error!(
                         "[peer:{}] Error reading from peer: {} (kind: {:?}). Disconnecting.",
                         username,
                         e,
                         e.kind()
                     );
-                    self.disconnect_with_error(e);
+                    self.disconnect(Some(e));
                     return;
                 }
             }
@@ -297,7 +272,7 @@ impl PeerActor {
     }
 
     fn extract_and_process_messages(&mut self) {
-        let username = self.peer.read().unwrap().username.clone();
+        let username = self.peer.username.clone();
         let mut extracted_count = 0;
         loop {
             match self.reader.extract_message() {
@@ -322,7 +297,7 @@ impl PeerActor {
                         "[peer:{}] Error extracting message: {}. Disconnecting peer.",
                         username, e
                     );
-                    self.disconnect_with_error(e);
+                    self.disconnect(Some(e));
                     return;
                 }
                 Ok(None) => {
@@ -331,7 +306,7 @@ impl PeerActor {
             }
         }
 
-        self.process_dispatcher_messages();
+        self.drain_signals();
     }
 
     fn send_message(&mut self, message: Message) {
@@ -343,7 +318,7 @@ impl PeerActor {
             }
         };
 
-        let username = self.peer.read().unwrap().username.clone();
+        let username = self.peer.username.clone();
         trace!(
             "[peer:{}] ➡ {:?}",
             username,
@@ -374,44 +349,26 @@ impl PeerActor {
                     "[peer:{}] Error writing message: {}. Disconnecting.",
                     username, e
                 );
-                self.disconnect_with_error(e);
+                self.disconnect(Some(e));
             }
         }
     }
 
-    fn disconnect_with_error(&mut self, error: io::Error) {
-        let username = self.peer.read().unwrap().username.clone();
-        debug!("[peer:{}] disconnect", username);
-
+    fn disconnect(&mut self, error: Option<io::Error>) {
+        debug!("[peer:{}] disconnect", self.peer.username);
         self.stream.take();
-
         if let Err(e) = self.client_channel.send(ClientOperation::PeerDisconnected(
-            username,
-            Some(error.into()),
+            self.peer.username.clone(),
+            error.map(Into::into),
         )) {
-            error!("Failed to send disconnect notification: {}", e);
-        }
-    }
-    fn disconnect(&mut self) {
-        let username = self.peer.read().unwrap().username.clone();
-        debug!("[peer:{}] disconnect", username);
-
-        self.stream.take();
-
-        if let Err(e) = self
-            .client_channel
-            .send(ClientOperation::PeerDisconnected(username, None))
-        {
             error!("Failed to send disconnect notification: {}", e);
         }
     }
 
     fn initiate_connection(&mut self) -> bool {
-        let peer = self.peer.read().unwrap();
-        let username = peer.username.clone();
-        let host = peer.host.clone();
-        let port = peer.port;
-        drop(peer);
+        let username = self.peer.username.clone();
+        let host = self.peer.host.clone();
+        let port = self.peer.port;
 
         let socket_addr = format!("{}:{}", host, port).parse::<std::net::SocketAddr>();
 
@@ -421,27 +378,24 @@ impl PeerActor {
                     since: Instant::now(),
                 };
 
-                // Spawn async connect so we don't block the tokio runtime
-                let handle = self.self_handle.clone();
+                let signal_tx = self.signal_tx.clone();
                 tokio::spawn(async move {
                     let timeout = Duration::from_secs(5);
                     let result = tokio::time::timeout(timeout, TcpStream::connect(addr)).await;
 
-                    if let Some(ref handle) = handle {
-                        match result {
-                            Ok(Ok(stream)) => {
-                                stream.set_nodelay(true).ok();
-                                let _ = handle.send(PeerMessage::ConnectionEstablished(stream));
-                            }
-                            Ok(Err(e)) => {
-                                let _ = handle.send(PeerMessage::ConnectionFailed(e));
-                            }
-                            Err(_) => {
-                                let _ = handle.send(PeerMessage::ConnectionFailed(io::Error::new(
-                                    io::ErrorKind::TimedOut,
-                                    "connection timed out",
-                                )));
-                            }
+                    match result {
+                        Ok(Ok(stream)) => {
+                            stream.set_nodelay(true).ok();
+                            let _ = signal_tx.send(PeerSignal::ConnectionEstablished(stream));
+                        }
+                        Ok(Err(e)) => {
+                            let _ = signal_tx.send(PeerSignal::ConnectionFailed(e));
+                        }
+                        Err(_) => {
+                            let _ = signal_tx.send(PeerSignal::ConnectionFailed(io::Error::new(
+                                io::ErrorKind::TimedOut,
+                                "connection timed out",
+                            )));
                         }
                     }
                 });
@@ -452,7 +406,7 @@ impl PeerActor {
                     "[peer:{}] Invalid socket address {}:{} - {}",
                     username, host, port, e
                 );
-                self.disconnect_with_error(io::Error::new(io::ErrorKind::InvalidInput, e));
+                self.disconnect(Some(io::Error::new(io::ErrorKind::InvalidInput, e)));
                 false
             }
         }
@@ -463,29 +417,26 @@ impl PeerActor {
             return;
         };
 
-        // Safety timeout in case the async connect task never responds
         if since.elapsed() > Duration::from_secs(10) {
-            let username = self.peer.read().unwrap().username.clone();
-            error!("[peer:{}] Connection timeout after 10 seconds", username);
-            self.disconnect_with_error(io::Error::new(
+            error!(
+                "[peer:{}] Connection timeout after 10 seconds",
+                self.peer.username
+            );
+            self.disconnect(Some(io::Error::new(
                 io::ErrorKind::TimedOut,
                 "Connection timeout",
-            ));
+            )));
         }
     }
 
     fn on_connection_established(&mut self) {
-        let peer = self.peer.read().unwrap();
-        let username = peer.username.clone();
-        let token = peer.token.unwrap_or(PierceToken(0));
-        drop(peer);
+        let username = self.peer.username.clone();
+        let token = self.peer.token.unwrap_or(PierceToken(0));
 
         let Some(ref stream) = self.stream else {
             return;
         };
 
-        // For outbound connections (ConnectToPeer), send PierceFireWall
-        // so the remote peer can match this connection to the original request.
         if self.needs_handshake {
             let handshake_msg = MessageFactory::build_pierce_firewall_message(token.0);
             match stream.try_write(&handshake_msg.get_buffer()) {
@@ -500,7 +451,7 @@ impl PeerActor {
                         "[peer:{}] Failed to send PierceFireWall handshake: {}",
                         username, e
                     );
-                    self.disconnect_with_error(e);
+                    self.disconnect(Some(e));
                     return;
                 }
             }
@@ -508,24 +459,25 @@ impl PeerActor {
 
         self.initialize_dispatcher();
 
-        let queued = std::mem::take(&mut self.queued_messages);
-        for msg in queued {
-            self.handle_message(msg);
+        let queued = std::mem::take(&mut self.queued_commands);
+        for cmd in queued {
+            self.handle_command(cmd);
         }
 
-        if let Some(ref handle) = self.self_handle {
-            handle.send(PeerMessage::ProcessRead).ok();
-        }
-
+        self.signal_tx.send(PeerSignal::ProcessRead).ok();
         self.process_read();
     }
 }
 
 impl Actor for PeerActor {
-    type Message = PeerMessage;
+    type Message = PeerCommand;
 
     fn handle(&mut self, msg: Self::Message) {
-        self.handle_message(msg);
+        if matches!(self.connection_state, ConnectionState::Connecting { .. }) {
+            self.queued_commands.push(msg);
+            return;
+        }
+        self.handle_command(msg);
     }
 
     fn on_start(&mut self) {
@@ -538,12 +490,12 @@ impl Actor for PeerActor {
     }
 
     fn on_stop(&mut self) {
-        let username = self.peer.read().unwrap().username.clone();
-        trace!("[peer:{}] actor stopping", username);
-        self.disconnect();
+        trace!("[peer:{}] actor stopping", self.peer.username);
+        self.disconnect(None);
     }
 
     fn tick(&mut self) {
+        self.drain_signals();
         match self.connection_state {
             ConnectionState::Connecting { .. } => {
                 self.check_connection_status();

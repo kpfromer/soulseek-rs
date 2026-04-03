@@ -82,6 +82,10 @@ pub struct ClientSettings {
     pub search_rate_limit_settings: Option<SearchRateLimitSettings>,
     /// Controls the rate limiting of downloads to prevent abuse, and being banned.
     pub download_rate_limit_settings: Option<DownloadRateLimitSettings>,
+    /// Advertised shared folder count — sent to the server after login and to peers on request.
+    pub shared_folders: u32,
+    /// Advertised shared file count — sent to the server after login and to peers on request.
+    pub shared_files: u32,
 }
 
 impl ClientSettings {
@@ -123,6 +127,8 @@ impl Default for ClientSettings {
             download_rate_limit_settings: Some(DownloadRateLimitSettings {
                 concurrent_downloads: 2,
             }),
+            shared_folders: 1,
+            shared_files: 499,
         }
     }
 }

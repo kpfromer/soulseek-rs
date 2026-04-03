@@ -2,17 +2,17 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::{
     message::{Message, MessageHandler},
-    peer::PeerMessage,
+    peer::PeerSignal,
     trace,
 };
 
 pub struct PeerInit;
-impl MessageHandler<PeerMessage> for PeerInit {
+impl MessageHandler<PeerSignal> for PeerInit {
     fn get_code(&self) -> u32 {
         1
     }
 
-    fn handle(&self, message: &mut Message, sender: UnboundedSender<PeerMessage>) {
+    fn handle(&self, message: &mut Message, sender: UnboundedSender<PeerSignal>) {
         message.set_pointer(4);
         let _message_code = message.read_int8();
         let username = message.read_string();
@@ -23,6 +23,6 @@ impl MessageHandler<PeerMessage> for PeerInit {
             username, connection_type, token
         );
 
-        sender.send(PeerMessage::SetUsername(username)).unwrap();
+        sender.send(PeerSignal::SetUsername(username)).unwrap();
     }
 }

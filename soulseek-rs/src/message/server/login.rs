@@ -1,20 +1,20 @@
-use crate::{actor::server_actor::ServerMessage, debug, info, message::Message};
+use crate::{actor::server_actor::ServerSignal, debug, info, message::Message};
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::message::MessageHandler;
 
 pub struct LoginHandler;
 
-impl MessageHandler<ServerMessage> for LoginHandler {
+impl MessageHandler<ServerSignal> for LoginHandler {
     fn get_code(&self) -> u32 {
         1
     }
 
-    fn handle(&self, message: &mut Message, sender: UnboundedSender<ServerMessage>) {
+    fn handle(&self, message: &mut Message, sender: UnboundedSender<ServerSignal>) {
         let response = message.read_int8();
 
         if response != 1 {
-            return sender.send(ServerMessage::LoginStatus(false)).unwrap();
+            return sender.send(ServerSignal::LoginStatus(false)).unwrap();
         }
 
         info!("Login successful");
@@ -30,7 +30,7 @@ impl MessageHandler<ServerMessage> for LoginHandler {
         let supporter = message.read_bool();
         debug!("Supporter status: {}", supporter);
 
-        sender.send(ServerMessage::LoginStatus(true)).unwrap();
+        sender.send(ServerSignal::LoginStatus(true)).unwrap();
     }
 }
 

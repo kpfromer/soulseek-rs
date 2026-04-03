@@ -1,4 +1,4 @@
-use crate::actor::server_actor::{ServerMessage, UserMessage};
+use crate::actor::server_actor::{ServerSignal, UserMessage};
 use crate::info;
 use crate::message::{Message, MessageHandler};
 
@@ -6,12 +6,12 @@ use tokio::sync::mpsc::UnboundedSender;
 
 pub struct MessageUser;
 
-impl MessageHandler<ServerMessage> for MessageUser {
+impl MessageHandler<ServerSignal> for MessageUser {
     fn get_code(&self) -> u32 {
         22
     }
 
-    fn handle(&self, message: &mut Message, _sender: UnboundedSender<ServerMessage>) {
+    fn handle(&self, message: &mut Message, _sender: UnboundedSender<ServerSignal>) {
         let id = message.read_int32();
         let timestamp = message.read_int32();
         let username = message.read_string();
