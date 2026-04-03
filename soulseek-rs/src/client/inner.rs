@@ -3,7 +3,7 @@ use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 use crate::DownloadStatus;
-use crate::actor::server_actor::ServerMessage;
+use crate::actor::server_actor::ServerCommand;
 use crate::actor::{ActorHandle, ActorSystem};
 use crate::client::ClientOperation;
 use crate::path::SoulseekPath;
@@ -39,6 +39,7 @@ impl PendingDownload {
             username: self.username.clone(),
             filename: self.filename.clone(),
             token: self.token,
+            peer_token: None,
             size: self.size,
             download_directory: self.download_directory.clone(),
             status: DownloadStatus::Queued,
@@ -52,7 +53,7 @@ impl PendingDownload {
 /// Holds all live-connection resources. Created on connect, persists across disconnects
 /// (ServerActor handles auto-reconnect). Only cleared when a new connect() is initiated.
 pub struct ActiveConnection {
-    pub server_handle: ActorHandle<ServerMessage>,
+    pub server_handle: ActorHandle<ServerCommand>,
     /// Sender to the ConnectedWorker operations channel.
     pub op_tx: UnboundedSender<ClientOperation>,
     /// Actor system — used for shutdown.
@@ -66,7 +67,6 @@ pub struct ClientInner {
     pub active: Option<ActiveConnection>,
     /// Downloads queued before connect() is ever called; seeded into the worker on first connect.
     pub pending_downloads: VecDeque<PendingDownload>,
-    pub search_limiter: Option<SlidingRateLimiter>,
 }
 
 impl Drop for ClientInner {

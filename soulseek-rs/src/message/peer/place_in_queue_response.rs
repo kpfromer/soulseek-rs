@@ -1,23 +1,23 @@
 use crate::{
     message::{Message, MessageHandler},
     path::SoulseekPath,
-    peer::PeerMessage,
+    peer::PeerSignal,
 };
 use tokio::sync::mpsc::UnboundedSender;
 
 pub struct PlaceInQueueResponse;
 
-impl MessageHandler<PeerMessage> for PlaceInQueueResponse {
+impl MessageHandler<PeerSignal> for PlaceInQueueResponse {
     fn get_code(&self) -> u32 {
         43
     }
 
-    fn handle(&self, message: &mut Message, sender: UnboundedSender<PeerMessage>) {
+    fn handle(&self, message: &mut Message, sender: UnboundedSender<PeerSignal>) {
         let filename = SoulseekPath::from_wire(message.read_string());
         let place = message.read_int32();
 
         sender
-            .send(PeerMessage::PlaceInQueueResponse { filename, place })
+            .send(PeerSignal::PlaceInQueueResponse { filename, place })
             .unwrap();
     }
 }

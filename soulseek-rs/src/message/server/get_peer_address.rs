@@ -1,15 +1,15 @@
-use crate::actor::server_actor::ServerMessage;
+use crate::actor::server_actor::ServerSignal;
 use crate::message::{Message, MessageHandler};
 use tokio::sync::mpsc::UnboundedSender;
 
 pub struct GetPeerAddressHandler;
 
-impl MessageHandler<ServerMessage> for GetPeerAddressHandler {
+impl MessageHandler<ServerSignal> for GetPeerAddressHandler {
     fn get_code(&self) -> u32 {
         3
     }
 
-    fn handle(&self, message: &mut Message, sender: UnboundedSender<ServerMessage>) {
+    fn handle(&self, message: &mut Message, sender: UnboundedSender<ServerSignal>) {
         let username = message.read_string();
 
         // Read IP address as 4 bytes
@@ -25,7 +25,7 @@ impl MessageHandler<ServerMessage> for GetPeerAddressHandler {
         println!("GetPeerAddressHandler: {:?}", username); // Debug print
 
         sender
-            .send(ServerMessage::GetPeerAddressResponse {
+            .send(ServerSignal::GetPeerAddressResponse {
                 username,
                 host,
                 port,

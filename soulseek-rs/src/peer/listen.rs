@@ -1,5 +1,6 @@
 use std::io;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
@@ -8,12 +9,14 @@ use tokio::sync::oneshot;
 
 use crate::client::{ClientContext, ClientOperation};
 use crate::message::{Message, MessageReader};
-use crate::peer::{ConnectionType, DownloadPeer, Peer};
-use crate::token::DownloadToken;
-use crate::{DownloadStatus, debug, error, info, trace};
+use crate::peer::download_peer::spawn_direct_download;
+use crate::peer::{ConnectionType, Peer};
+use crate::token::PeerTransferToken;
+use crate::{debug, error, info, trace};
 
 const PEER_INIT_MESSAGE_CODE: u8 = 1;
 const PIERCE_FIREWALL_MESSAGE_CODE: u8 = 0;
+const PEER_INIT_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone)]
 struct ConnectionContext {
@@ -49,7 +52,7 @@ async fn read_peer_init_message(
     }
 }
 
-fn parse_pierce_firewall_token(message: &mut Message) -> Option<DownloadToken> {
+fn parse_pierce_firewall_token(message: &mut Message) -> Option<PeerTransferToken> {
     message.set_pointer(4);
     let message_code = message.read_int8();
 
@@ -57,7 +60,7 @@ fn parse_pierce_firewall_token(message: &mut Message) -> Option<DownloadToken> {
         return None;
     }
 
-    Some(DownloadToken(message.read_int32()))
+    Some(PeerTransferToken(message.read_int32()))
 }
 
 fn parse_peer_init_message(mut message: Message) -> Option<PeerInitData> {
@@ -75,7 +78,7 @@ fn parse_peer_init_message(mut message: Message) -> Option<PeerInitData> {
     })
 }
 
-fn parse_token_from_buffer(buffer: &[u8], username: &str) -> Option<DownloadToken> {
+fn parse_token_from_buffer(buffer: &[u8], username: &str) -> Option<PeerTransferToken> {
     let token_bytes = buffer.get(0..4)?;
     let token = u32::from_le_bytes(token_bytes.try_into().unwrap_or_else(|_| {
         panic!(
@@ -83,7 +86,7 @@ fn parse_token_from_buffer(buffer: &[u8], username: &str) -> Option<DownloadToke
             username
         )
     }));
-    Some(DownloadToken(token))
+    Some(PeerTransferToken(token))
 }
 
 fn handle_peer_connection(
@@ -116,9 +119,21 @@ async fn handle_incoming_connection(stream: TcpStream, context: ConnectionContex
     let mut stream = stream;
     let mut reader = MessageReader::new();
 
-    let Ok(mut message) = read_peer_init_message(&mut stream, &mut reader).await else {
-        error!("[listener:{peer_ip}:{peer_port}] Failed to read peer init message");
-        return;
+    let mut message = match tokio::time::timeout(
+        PEER_INIT_TIMEOUT,
+        read_peer_init_message(&mut stream, &mut reader),
+    )
+    .await
+    {
+        Ok(Ok(msg)) => msg,
+        Ok(Err(e)) => {
+            error!("[listener:{peer_ip}:{peer_port}] Failed to read peer init message: {e}");
+            return;
+        }
+        Err(_) => {
+            debug!("[listener:{peer_ip}:{peer_port}] Peer init timed out, dropping connection");
+            return;
+        }
     };
 
     // Check for PierceFireWall message (code 0)
@@ -139,48 +154,16 @@ async fn handle_incoming_connection(stream: TcpStream, context: ConnectionContex
             return;
         };
 
-        let peer = Peer::new(
-            format!("{}:pierce", peer_ip),
-            ConnectionType::F,
-            peer_ip.clone(),
-            peer_port.into(),
-            None,
-            0,
-            0,
-            0,
-        );
-
-        // Convert tokio TcpStream to std for DownloadPeer (which still uses blocking I/O)
         let std_stream = stream.into_std().unwrap();
-        let client_sender = context.client_sender.clone();
-        let own_username = context.own_username.clone();
-
-        tokio::task::spawn_blocking(move || {
-            let download_peer = DownloadPeer::new(
-                peer.username.clone(),
-                peer.host.clone(),
-                peer.port,
-                token.0,
-                own_username,
-            );
-
-            match download_peer.download_direct(download, Some(std_stream)) {
-                Ok((dl, filename)) => {
-                    let _ = dl.sender.send(DownloadStatus::Completed);
-                    let _ = client_sender.send(ClientOperation::DownloadCompleted(dl.token, Ok(filename)));
-                }
-                Err(e) => {
-                    error!(
-                        "Failed to download file via PierceFireWall (token: {}) - Error: {}",
-                        token, e
-                    );
-                    let _ = client_sender.send(ClientOperation::DownloadCompleted(
-                        token,
-                        Err(crate::error::SoulseekRs::InvalidMessage(e.to_string())),
-                    ));
-                }
-            }
-        });
+        spawn_direct_download(
+            download,
+            peer_ip,
+            peer_port.into(),
+            token.0,
+            context.own_username.clone(),
+            Some(std_stream),
+            context.client_sender.clone(),
+        );
         return;
     }
 
@@ -195,7 +178,7 @@ async fn handle_incoming_connection(stream: TcpStream, context: ConnectionContex
     );
 
     let peer = Peer::new(
-        format!("{}:direct", init_data.username),
+        init_data.username.clone(),
         init_data.connection_type.clone(),
         peer_ip.clone(),
         peer_port.into(),
@@ -237,42 +220,15 @@ async fn handle_incoming_connection(stream: TcpStream, context: ConnectionContex
             };
 
             let std_stream = stream.into_std().unwrap();
-            let client_sender = context.client_sender.clone();
-            let own_username = context.own_username.clone();
-            let peer_host = peer.host.clone();
-            let peer_port_val = peer.port;
-            let connection_token = init_data.token;
-            let peer_username = init_data.username.clone();
-
-            tokio::task::spawn_blocking(move || {
-                trace!(
-                    "[listener:{}:{}] handling file connection in blocking task",
-                    peer_ip, peer_port
-                );
-                let download_peer = DownloadPeer::new(
-                    format!("{}:direct", peer_username),
-                    peer_host.clone(),
-                    peer_port_val,
-                    connection_token,
-                    own_username,
-                );
-                match download_peer.download_direct(download, Some(std_stream)) {
-                    Ok((dl, filename)) => {
-                        let _ = dl.sender.send(DownloadStatus::Completed);
-                        let _ = client_sender.send(ClientOperation::DownloadCompleted(dl.token, Ok(filename)));
-                    }
-                    Err(e) => {
-                        error!(
-                            "Failed to download file from {}:{} (token: {}) - Error: {}",
-                            peer_host, peer_port_val, download_token, e
-                        );
-                        let _ = client_sender.send(ClientOperation::DownloadCompleted(
-                            download_token,
-                            Err(crate::error::SoulseekRs::InvalidMessage(e.to_string())),
-                        ));
-                    }
-                }
-            });
+            spawn_direct_download(
+                download,
+                peer.host,
+                peer.port,
+                init_data.token,
+                context.own_username.clone(),
+                Some(std_stream),
+                context.client_sender.clone(),
+            );
         }
         ConnectionType::D => {
             debug!(

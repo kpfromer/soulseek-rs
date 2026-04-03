@@ -3,6 +3,10 @@ name = "musicbrainz"
 version.workspace = true
 edition.workspace = true
 
+[[example]]
+name = "lookup"
+required-features = []
+
 [dependencies]
 backon = "1.6.0"
 governor = "0.6"
@@ -12,12 +16,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 thiserror = "2"
-tokio = { version = "1", features = ["rt", "macros"] }
+tokio = { version = "1", features = ["macros", "rt"] }
 which = "8"
-
-[[example]]
-name = "lookup"
-required-features = []
 
 [dev-dependencies]
 clap = { version = "4", features = ["derive", "env"] }
+reqwest = "0.12"
+url = "2.5.8"

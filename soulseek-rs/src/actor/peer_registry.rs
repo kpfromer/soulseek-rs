@@ -1,4 +1,4 @@
-use crate::actor::peer_actor::{PeerActor, PeerMessage};
+use crate::actor::peer_actor::{PeerActor, PeerCommand};
 use crate::actor::{ActorHandle, ActorSystem};
 use crate::client::ClientOperation;
 use crate::debug;
@@ -13,10 +13,12 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc::UnboundedSender;
 
 pub struct PeerRegistry {
-    peers: Arc<Mutex<HashMap<String, ActorHandle<PeerMessage>>>>,
+    peers: Arc<Mutex<HashMap<String, ActorHandle<PeerCommand>>>>,
     actor_system: Arc<ActorSystem>,
     client_channel: UnboundedSender<ClientOperation>,
     own_username: String,
+    shared_folders: u32,
+    shared_files: u32,
 }
 
 impl PeerRegistry {
@@ -24,12 +26,16 @@ impl PeerRegistry {
         actor_system: Arc<ActorSystem>,
         client_channel: UnboundedSender<ClientOperation>,
         own_username: String,
+        shared_folders: u32,
+        shared_files: u32,
     ) -> Self {
         Self {
             peers: Arc::new(Mutex::new(HashMap::new())),
             actor_system,
             client_channel,
             own_username,
+            shared_folders,
+            shared_files,
         }
     }
 
@@ -38,7 +44,7 @@ impl PeerRegistry {
         peer: Peer,
         stream: Option<TcpStream>,
         reader: Option<MessageReader>,
-    ) -> Result<ActorHandle<PeerMessage>, String> {
+    ) -> Result<ActorHandle<PeerCommand>, String> {
         let username = peer.username.clone();
 
         let actor = PeerActor::new(
@@ -47,11 +53,11 @@ impl PeerRegistry {
             reader,
             self.client_channel.clone(),
             self.own_username.clone(),
+            self.shared_folders,
+            self.shared_files,
         );
 
-        let handle = self.actor_system.spawn_with_handle(actor, |actor, handle| {
-            actor.set_self_handle(handle);
-        });
+        let handle = self.actor_system.spawn(actor);
 
         let mut peers = self.peers.lock().unwrap();
         peers.insert(username.clone(), handle.clone());
@@ -59,12 +65,12 @@ impl PeerRegistry {
         Ok(handle)
     }
 
-    pub fn get_peer(&self, username: &str) -> Option<ActorHandle<PeerMessage>> {
+    pub fn get_peer(&self, username: &str) -> Option<ActorHandle<PeerCommand>> {
         let peers = self.peers.lock().unwrap();
         peers.get(username).cloned()
     }
 
-    pub fn remove_peer(&self, username: &str) -> Option<ActorHandle<PeerMessage>> {
+    pub fn remove_peer(&self, username: &str) -> Option<ActorHandle<PeerCommand>> {
         let mut peers = self.peers.lock().unwrap();
         let handle = peers.remove(username);
 
@@ -90,7 +96,7 @@ impl PeerRegistry {
         peers.contains_key(username)
     }
 
-    pub fn send_to_peer(&self, username: &str, message: PeerMessage) -> Result<(), String> {
+    pub fn send_to_peer(&self, username: &str, message: PeerCommand) -> Result<(), String> {
         let handle = self
             .get_peer(username)
             .ok_or_else(|| format!("Peer {} not found in registry", username))?;
@@ -99,7 +105,7 @@ impl PeerRegistry {
     }
 
     pub fn queue_upload(&self, username: &str, filename: SoulseekPath) -> Result<(), String> {
-        self.send_to_peer(username, PeerMessage::QueueUpload(filename))
+        self.send_to_peer(username, PeerCommand::QueueUpload(filename))
     }
 }
 
@@ -110,6 +116,8 @@ impl Clone for PeerRegistry {
             actor_system: self.actor_system.clone(),
             client_channel: self.client_channel.clone(),
             own_username: self.own_username.clone(),
+            shared_folders: self.shared_folders,
+            shared_files: self.shared_files,
         }
     }
 }
