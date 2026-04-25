@@ -232,11 +232,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         },
                         DownloadStatus::Completed => {
                             tracks[i].is_downloaded = true;
-                            if let Err(e) = write_tracks_csv(&args.csv, &tracks) {
-                                if let Some(bar) = &track_bar {
+                            if let Err(e) = write_tracks_csv(&args.csv, &tracks)
+                                && let Some(bar) = &track_bar {
                                     bar.println(format!("  Warning: could not update CSV: {e}"));
                                 }
-                            }
                             if let Some(bar) = track_bar.take() {
                                 bar.set_length(bar.length().unwrap_or(1));
                                 bar.finish_with_message(format!("✓ {label}"));

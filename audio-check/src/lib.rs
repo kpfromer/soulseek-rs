@@ -81,7 +81,7 @@ pub fn check_file_with_options(
 ) -> Result<AudioInfo, AudioError> {
     let path = path.as_ref();
 
-    let file = File::open(path).map_err(|e| AudioError::Io(e))?;
+    let file = File::open(path).map_err(AudioError::Io)?;
     let mut hint = Hint::new();
 
     if let Some(extension) = path.extension().and_then(|e| e.to_str()) {

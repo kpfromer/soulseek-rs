@@ -87,6 +87,7 @@ enum ProcessOutcome {
     BadFile(audio_check::AudioError),
 }
 
+#[allow(clippy::large_enum_variant)]
 enum LookupOutcome {
     Resolved(ResolvedTrackMetadata),
     NoMetadataAvailable,
