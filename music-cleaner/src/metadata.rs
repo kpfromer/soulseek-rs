@@ -122,7 +122,9 @@ pub fn apply_metadata(
 /// Returns `None` when no tag is found or the tag has no title.
 pub fn read_existing_tags(path: &Path) -> anyhow::Result<Option<FileTagMetadata>> {
     let tagged_file = lofty::read_from_path(path)?;
-    let tag = tagged_file.primary_tag().or_else(|| tagged_file.first_tag());
+    let tag = tagged_file
+        .primary_tag()
+        .or_else(|| tagged_file.first_tag());
     let Some(tag) = tag else {
         return Ok(None);
     };
@@ -144,8 +146,16 @@ pub fn read_existing_tags(path: &Path) -> anyhow::Result<Option<FileTagMetadata>
         track_number: tag.track().map(|n| n as i32),
         album_title: album,
         album_year: tag.year().map(|y| y as i32),
-        track_artists: if artist.is_empty() { vec![] } else { vec![artist] },
-        album_artists: if album_artist.is_empty() { vec![] } else { vec![album_artist] },
+        track_artists: if artist.is_empty() {
+            vec![]
+        } else {
+            vec![artist]
+        },
+        album_artists: if album_artist.is_empty() {
+            vec![]
+        } else {
+            vec![album_artist]
+        },
     }))
 }
 
@@ -217,10 +227,7 @@ fn write_musicbrainz_tags(tag: &mut Tag, meta: &TrackMetadata) {
     }
 
     // MusicBrainz IDs — lofty maps these to the correct native format fields.
-    tag.insert_text(
-        ItemKey::MusicBrainzReleaseId,
-        meta.release_mbid.clone(),
-    );
+    tag.insert_text(ItemKey::MusicBrainzReleaseId, meta.release_mbid.clone());
 
     if let Some(ref mbid) = meta.track_musicbrainz_id {
         // MusicBrainzRecordingId maps to MUSICBRAINZ_TRACKID (Vorbis) /

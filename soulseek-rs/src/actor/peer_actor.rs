@@ -1,6 +1,5 @@
 use crate::actor::{Actor, ConnectionState};
 use crate::client::ClientOperation;
-use crate::token::{PeerTransferToken, PierceToken};
 use crate::dispatcher::MessageDispatcher;
 use crate::message::peer::{
     FileSearchResponse, GetShareFileList, PeerInit, PlaceInQueueResponse, TransferRequest,
@@ -11,6 +10,7 @@ use crate::message::server::MessageFactory;
 use crate::message::{Handlers, Message, MessageReader, MessageType};
 use crate::path::SoulseekPath;
 use crate::peer::Peer;
+use crate::token::{PeerTransferToken, PierceToken};
 use crate::types::{Download, SearchResult, Transfer};
 use crate::{debug, error, trace, warn};
 
@@ -110,10 +110,7 @@ impl PeerActor {
         handlers.register_handler(PlaceInQueueResponse);
         handlers.register_handler(PeerInit);
 
-        self.dispatcher = Some(MessageDispatcher::new(
-            self.signal_tx.clone(),
-            handlers,
-        ));
+        self.dispatcher = Some(MessageDispatcher::new(self.signal_tx.clone(), handlers));
     }
 
     fn drain_signals(&mut self) {
@@ -185,11 +182,14 @@ impl PeerActor {
                         "[peer:{}] Transfer rejected: {:?} - token {}, resetting timeout...",
                         _username, reason, token
                     );
-                    if let Err(_e) = self.client_channel.send(ClientOperation::TransferRejected {
-                        token,
-                        reason,
-                    }) {
-                        error!("[peer:{}] Failed to send TransferRejected: {}", _username, _e);
+                    if let Err(_e) = self
+                        .client_channel
+                        .send(ClientOperation::TransferRejected { token, reason })
+                    {
+                        error!(
+                            "[peer:{}] Failed to send TransferRejected: {}",
+                            _username, _e
+                        );
                     }
                 } else {
                     debug!(
@@ -201,7 +201,10 @@ impl PeerActor {
                         self.peer.clone(),
                         allowed,
                     )) {
-                        error!("[peer:{}] Failed to send DownloadFromPeer: {}", _username, _e);
+                        error!(
+                            "[peer:{}] Failed to send DownloadFromPeer: {}",
+                            _username, _e
+                        );
                     }
                 }
             }
@@ -211,12 +214,18 @@ impl PeerActor {
                     "[peer:{}] Place in queue response - file: {}, place: {}",
                     _username, filename, place
                 );
-                if let Err(_e) = self.client_channel.send(ClientOperation::QueuePositionUpdated {
-                    username: _username.clone(),
-                    filename,
-                    place,
-                }) {
-                    error!("[peer:{}] Failed to send QueuePositionUpdated: {}", _username, _e);
+                if let Err(_e) = self
+                    .client_channel
+                    .send(ClientOperation::QueuePositionUpdated {
+                        username: _username.clone(),
+                        filename,
+                        place,
+                    })
+                {
+                    error!(
+                        "[peer:{}] Failed to send QueuePositionUpdated: {}",
+                        _username, _e
+                    );
                 }
             }
             PeerSignal::SetUsername(username) => {
@@ -252,7 +261,10 @@ impl PeerActor {
             match stream.try_read(&mut temp_buffer) {
                 Ok(0) => {
                     // EOF — remote closed the connection cleanly.
-                    trace!("[peer:{}] EOF, remote closed connection", self.peer.username);
+                    trace!(
+                        "[peer:{}] EOF, remote closed connection",
+                        self.peer.username
+                    );
                     self.disconnect(None);
                     return;
                 }
@@ -353,7 +365,10 @@ impl PeerActor {
                 );
             }
             Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                warn!("[peer:{}] Write would block, message may be lost", _username);
+                warn!(
+                    "[peer:{}] Write would block, message may be lost",
+                    _username
+                );
             }
             Err(e) => {
                 error!(

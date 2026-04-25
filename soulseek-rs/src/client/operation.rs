@@ -35,9 +35,16 @@ pub enum ClientOperation {
     DownloadFromPeer(PeerTransferToken, Peer, bool),
     UpdateDownloadTokens(Transfer, String),
     /// Peer told us our position in their upload queue; transitions download to QueuedRemotely.
-    QueuePositionUpdated { username: String, filename: SoulseekPath, place: u32 },
+    QueuePositionUpdated {
+        username: String,
+        filename: SoulseekPath,
+        place: u32,
+    },
     /// Peer sent TransferResponse(allowed=false); download stays queued, timeout resets.
-    TransferRejected { token: PeerTransferToken, reason: Option<String> },
+    TransferRejected {
+        token: PeerTransferToken,
+        reason: Option<String>,
+    },
     UploadFailed(String, SoulseekPath),
     /// A download finished (success or failure); carries token and path-or-error.
     DownloadCompleted(DownloadToken, Result<String, SoulseekRs>),

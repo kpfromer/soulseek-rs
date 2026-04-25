@@ -1,6 +1,9 @@
 use crate::actor::Actor;
 use crate::client::{ClientOperation, KeepAliveSettings, ReconnectSettings};
 use crate::dispatcher::MessageDispatcher;
+use crate::message::Handlers;
+#[allow(unused_imports)]
+use crate::message::MessageType;
 use crate::message::server::ConnectToPeerHandler;
 use crate::message::server::ExcludedSearchPhrasesHandler;
 use crate::message::server::FileSearchHandler;
@@ -13,9 +16,6 @@ use crate::message::server::ParentSpeedRatioHandler;
 use crate::message::server::PrivilegedUsersHandler;
 use crate::message::server::RoomListHandler;
 use crate::message::server::WishListIntervalHandler;
-use crate::message::Handlers;
-#[allow(unused_imports)]
-use crate::message::MessageType;
 use crate::message::{Message, MessageReader};
 use crate::peer::ConnectionType;
 use crate::peer::Peer;
@@ -191,7 +191,10 @@ impl ServerActor {
             enable_listen: config.enable_listen,
             shared_folders: config.shared_folders,
             shared_files: config.shared_files,
-            connection: ServerConnection::Disconnected { reconnect_attempt: 0, last_disconnect: None },
+            connection: ServerConnection::Disconnected {
+                reconnect_attempt: 0,
+                last_disconnect: None,
+            },
             login_state: LoginState::NotAttempted,
             reader: MessageReader::new(),
             client_channel,
@@ -209,8 +212,12 @@ impl ServerActor {
 
     fn current_reconnect_attempt(&self) -> u32 {
         match &self.connection {
-            ServerConnection::Disconnected { reconnect_attempt, .. } => *reconnect_attempt,
-            ServerConnection::Connecting { reconnect_attempt, .. } => *reconnect_attempt,
+            ServerConnection::Disconnected {
+                reconnect_attempt, ..
+            } => *reconnect_attempt,
+            ServerConnection::Connecting {
+                reconnect_attempt, ..
+            } => *reconnect_attempt,
             ServerConnection::Connected { .. } => 0,
         }
     }
@@ -233,51 +240,49 @@ impl ServerActor {
         let socket_addr = socket_addrs.next();
 
         match socket_addr {
-            Some(addr) => {
-                match std::net::TcpStream::connect(addr) {
-                    Ok(std_stream) => {
-                        let socket = socket2::Socket::from(std_stream);
-                        if let KeepAliveSettings::Enabled {
-                            idle,
-                            interval,
-                            count,
-                            ..
-                        } = &self.tcp_keepalive
-                        {
-                            let ka = socket2::TcpKeepalive::new()
-                                .with_time(*idle)
-                                .with_interval(*interval)
-                                .with_retries(*count);
-                            socket.set_tcp_keepalive(&ka).ok();
-                        }
-                        let std_stream: std::net::TcpStream = socket.into();
-
-                        std_stream.set_nodelay(true).ok();
-                        std_stream.set_nonblocking(true).ok();
-
-                        match TcpStream::from_std(std_stream) {
-                            Ok(stream) => {
-                                let reconnect_attempt = self.current_reconnect_attempt();
-                                self.connection = ServerConnection::Connecting {
-                                    stream,
-                                    since: Instant::now(),
-                                    reconnect_attempt,
-                                };
-                                true
-                            }
-                            Err(e) => {
-                                error!("[server] Failed to convert to tokio TcpStream: {}", e);
-                                self.disconnect_with_error(e);
-                                false
-                            }
-                        }
+            Some(addr) => match std::net::TcpStream::connect(addr) {
+                Ok(std_stream) => {
+                    let socket = socket2::Socket::from(std_stream);
+                    if let KeepAliveSettings::Enabled {
+                        idle,
+                        interval,
+                        count,
+                        ..
+                    } = &self.tcp_keepalive
+                    {
+                        let ka = socket2::TcpKeepalive::new()
+                            .with_time(*idle)
+                            .with_interval(*interval)
+                            .with_retries(*count);
+                        socket.set_tcp_keepalive(&ka).ok();
                     }
-                    Err(e) => {
-                        self.disconnect_with_error(e);
-                        false
+                    let std_stream: std::net::TcpStream = socket.into();
+
+                    std_stream.set_nodelay(true).ok();
+                    std_stream.set_nonblocking(true).ok();
+
+                    match TcpStream::from_std(std_stream) {
+                        Ok(stream) => {
+                            let reconnect_attempt = self.current_reconnect_attempt();
+                            self.connection = ServerConnection::Connecting {
+                                stream,
+                                since: Instant::now(),
+                                reconnect_attempt,
+                            };
+                            true
+                        }
+                        Err(e) => {
+                            error!("[server] Failed to convert to tokio TcpStream: {}", e);
+                            self.disconnect_with_error(e);
+                            false
+                        }
                     }
                 }
-            }
+                Err(e) => {
+                    self.disconnect_with_error(e);
+                    false
+                }
+            },
             None => {
                 let error_msg = format!("No socket addresses found for {}:{}", host, port);
                 error!("[server] {}", error_msg);
@@ -334,15 +339,18 @@ impl ServerActor {
                         Some(ClientOperation::ConnectToPeer(peer.clone()))
                     }
                     ConnectionType::D => None,
-                }
-                    && let Err(_e) = self.client_channel.send(op)
+                } && let Err(_e) = self.client_channel.send(op)
                 {
                     error!("[server] Failed to send ConnectToPeer: {}", _e);
                 }
             }
             ServerSignal::LoginStatus(logged_in) => {
                 match std::mem::replace(&mut self.login_state, LoginState::NotAttempted) {
-                    LoginState::Pending { credentials, response, .. } => {
+                    LoginState::Pending {
+                        credentials,
+                        response,
+                        ..
+                    } => {
                         if logged_in {
                             let _ = response.send(Ok(true));
                             self.login_state = LoginState::LoggedIn { credentials };
@@ -523,7 +531,9 @@ impl ServerActor {
 
         let new_reconnect_attempt = match &self.connection {
             ServerConnection::Connected { .. } => 1,
-            ServerConnection::Connecting { reconnect_attempt, .. } => reconnect_attempt + 1,
+            ServerConnection::Connecting {
+                reconnect_attempt, ..
+            } => reconnect_attempt + 1,
             ServerConnection::Disconnected { .. } => return,
         };
         self.connection = ServerConnection::Disconnected {
@@ -531,8 +541,11 @@ impl ServerActor {
             last_disconnect: Some(Instant::now()),
         };
 
-        if let LoginState::Pending { credentials, response, .. } =
-            std::mem::replace(&mut self.login_state, LoginState::NotAttempted)
+        if let LoginState::Pending {
+            credentials,
+            response,
+            ..
+        } = std::mem::replace(&mut self.login_state, LoginState::NotAttempted)
         {
             let _ = response.send(Err(SoulseekRs::ConnectionClosed));
             self.login_state = LoginState::LoggedIn { credentials };
@@ -584,7 +597,10 @@ impl ServerActor {
     fn on_connection_established(&mut self) {
         let stream = match std::mem::replace(
             &mut self.connection,
-            ServerConnection::Disconnected { reconnect_attempt: 0, last_disconnect: None },
+            ServerConnection::Disconnected {
+                reconnect_attempt: 0,
+                last_disconnect: None,
+            },
         ) {
             ServerConnection::Connecting { stream, .. } => stream,
             other => {
@@ -614,7 +630,10 @@ impl ServerActor {
         self.connection = ServerConnection::Connected { stream, dispatcher };
 
         // On reconnect (previously logged in), auto-queue login with stored credentials.
-        if let LoginState::LoggedIn { credentials: (ref u, ref p) } = self.login_state {
+        if let LoginState::LoggedIn {
+            credentials: (ref u, ref p),
+        } = self.login_state
+        {
             let (username, password) = (u.clone(), p.clone());
             info!("[server] Reconnect: auto-queuing login for {}", username);
             self.queue_message(MessageFactory::build_login_message(&username, &password));
@@ -635,9 +654,10 @@ impl ServerActor {
         }
 
         let (reconnect_attempt, last_disconnect) = match &self.connection {
-            ServerConnection::Disconnected { reconnect_attempt, last_disconnect } => {
-                (*reconnect_attempt, *last_disconnect)
-            }
+            ServerConnection::Disconnected {
+                reconnect_attempt,
+                last_disconnect,
+            } => (*reconnect_attempt, *last_disconnect),
             _ => return,
         };
 
@@ -702,8 +722,10 @@ impl Actor for ServerActor {
 
     fn on_stop(&mut self) {
         trace!("[server] actor stopping");
-        self.connection =
-            ServerConnection::Disconnected { reconnect_attempt: 0, last_disconnect: None };
+        self.connection = ServerConnection::Disconnected {
+            reconnect_attempt: 0,
+            last_disconnect: None,
+        };
     }
 
     fn tick(&mut self) {

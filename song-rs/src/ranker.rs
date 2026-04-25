@@ -30,7 +30,13 @@ pub(crate) fn rank_results(
             let parsed = parse_soulseek_filename(file.name.as_str());
 
             // Score this file.
-            let score = compare_tracks(query, &parsed, &file.attributes, &file_type, file.name.as_str());
+            let score = compare_tracks(
+                query,
+                &parsed,
+                &file.attributes,
+                &file_type,
+                file.name.as_str(),
+            );
 
             if score >= MIN_SCORE_THRESHOLD {
                 Some(SongResult {
@@ -100,15 +106,11 @@ fn compare_tracks(
 
     let format_score = score_format_quality(file_type, attrs.bitrate);
 
-    let score = title_score * 0.45 + artist_score * 0.30 + duration_score * 0.10 + format_score * 0.15;
+    let score =
+        title_score * 0.45 + artist_score * 0.30 + duration_score * 0.10 + format_score * 0.15;
     trace!(
         path = path_for_trace,
-        title_score,
-        artist_score,
-        duration_score,
-        format_score,
-        score,
-        "compare_tracks"
+        title_score, artist_score, duration_score, format_score, score, "compare_tracks"
     );
     score
 }
