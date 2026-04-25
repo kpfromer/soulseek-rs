@@ -152,7 +152,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             if retry == 0 {
                 search_spinner.set_message(format!("Searching for {label}"));
             } else {
-                search_spinner.set_message(format!("Retry {retry}/{} for {label}", args.max_retries - 1));
+                search_spinner.set_message(format!(
+                    "Retry {retry}/{} for {label}",
+                    args.max_retries - 1
+                ));
             }
 
             let results = match client.search(&query, timeout, &wanted).await {
@@ -182,7 +185,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     total,
                     attempt + 1,
                     candidate_count,
-                    if retry > 0 { format!(", retry {retry}") } else { String::new() },
+                    if retry > 0 {
+                        format!(", retry {retry}")
+                    } else {
+                        String::new()
+                    },
                 );
                 search_spinner.set_message(attempt_label.clone());
 
@@ -192,7 +199,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 {
                     Ok(pair) => pair,
                     Err(e) => {
-                        search_spinner.println(format!("  ↳ skip {} (could not initiate download: {e})", result.filename));
+                        search_spinner.println(format!(
+                            "  ↳ skip {} (could not initiate download: {e})",
+                            result.filename
+                        ));
                         continue;
                     }
                 };
@@ -202,7 +212,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 while let Some(status) = handle.recv().await {
                     match status {
                         DownloadStatus::QueuedLocally => {
-                            search_spinner.set_message(format!("{attempt_label}  [queued locally]"));
+                            search_spinner
+                                .set_message(format!("{attempt_label}  [queued locally]"));
                         }
                         DownloadStatus::QueuedRemotely { place } => {
                             search_spinner.set_message(format!(
@@ -232,10 +243,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         },
                         DownloadStatus::Completed => {
                             tracks[i].is_downloaded = true;
-                            if let Err(e) = write_tracks_csv(&args.csv, &tracks) {
-                                if let Some(bar) = &track_bar {
-                                    bar.println(format!("  Warning: could not update CSV: {e}"));
-                                }
+                            if let Err(e) = write_tracks_csv(&args.csv, &tracks)
+                                && let Some(bar) = &track_bar
+                            {
+                                bar.println(format!("  Warning: could not update CSV: {e}"));
                             }
                             if let Some(bar) = track_bar.take() {
                                 bar.set_length(bar.length().unwrap_or(1));
@@ -246,21 +257,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             continue 'tracks;
                         }
                         DownloadStatus::Failed => {
-                            search_spinner.println(format!("  ↳ skip {} (download failed)", result.filename));
+                            search_spinner
+                                .println(format!("  ↳ skip {} (download failed)", result.filename));
                             if let Some(bar) = track_bar.take() {
                                 bar.finish_and_clear();
                             }
                             break 'candidates;
                         }
                         DownloadStatus::TimedOut => {
-                            search_spinner.println(format!("  ↳ skip {} (timed out)", result.filename));
+                            search_spinner
+                                .println(format!("  ↳ skip {} (timed out)", result.filename));
                             if let Some(bar) = track_bar.take() {
                                 bar.finish_and_clear();
                             }
                             break;
                         }
                         DownloadStatus::Cancelled => {
-                            search_spinner.println(format!("  ↳ skip {} (cancelled)", result.filename));
+                            search_spinner
+                                .println(format!("  ↳ skip {} (cancelled)", result.filename));
                             if let Some(bar) = track_bar.take() {
                                 bar.finish_and_clear();
                             }

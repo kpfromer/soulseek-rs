@@ -2,8 +2,8 @@ pub mod download_peer;
 pub mod listen;
 
 // Export actor types
-pub use crate::actor::peer_actor::{PeerActor, PeerCommand};
 pub(crate) use crate::actor::peer_actor::PeerSignal;
+pub use crate::actor::peer_actor::{PeerActor, PeerCommand};
 pub use crate::actor::peer_registry::PeerRegistry;
 
 pub use download_peer::{DownloadError, DownloadPeer};

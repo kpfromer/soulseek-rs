@@ -17,6 +17,12 @@ test:
 fix:
   cargo fix --workspace --all-features
 
+shear:
+  cargo shear
+
+shear-fix:
+  cargo shear --fix
+
 run:
   cargo run -p soulseek-rs-lib --example search_and_download --features=tracing --release
 

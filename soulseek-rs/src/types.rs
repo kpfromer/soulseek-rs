@@ -60,8 +60,8 @@ pub struct SearchResult {
 
 #[derive(Debug, Clone)]
 pub struct Search {
-    pub token:   SearchToken,
-    pub query:   String,
+    pub token: SearchToken,
+    pub query: String,
     pub results: Vec<SearchResult>,
 }
 
@@ -197,7 +197,9 @@ pub enum DownloadStatus {
     QueuedLocally,
     /// `QueueUpload` sent; peer acknowledged and we are in their upload queue.
     /// `place` is `Some` when a `PlaceInQueueResponse` has been received.
-    QueuedRemotely { place: Option<u32> },
+    QueuedRemotely {
+        place: Option<u32>,
+    },
     InProgress {
         bytes_downloaded: u64,
         total_bytes: u64,

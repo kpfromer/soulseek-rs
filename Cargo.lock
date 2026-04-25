@@ -1336,7 +1336,6 @@ dependencies = [
  "musicbrainz_rs",
  "reqwest",
  "serde",
- "serde_json",
  "sha2",
  "thiserror 2.0.18",
  "tokio",
@@ -2054,7 +2053,6 @@ dependencies = [
 name = "soulseek-rs-lib"
 version = "0.1.0"
 dependencies = [
- "bytes",
  "socket2 0.5.10",
  "thiserror 2.0.18",
  "tokio",

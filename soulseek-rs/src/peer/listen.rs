@@ -97,7 +97,11 @@ fn handle_peer_connection(
     _peer_ip: &str,
     _peer_port: u16,
 ) {
-    match context.client_context.peer_registry.register_peer(peer.clone(), Some(stream), Some(reader)) {
+    match context.client_context.peer_registry.register_peer(
+        peer.clone(),
+        Some(stream),
+        Some(reader),
+    ) {
         Ok(_) => (),
         Err(_e) => {
             error!(
@@ -145,7 +149,9 @@ async fn handle_incoming_connection(stream: TcpStream, context: ConnectionContex
 
         // Query the worker for the download by token
         let (tx, rx) = oneshot::channel();
-        let _ = context.client_sender.send(ClientOperation::QueryDownloadByToken(token, tx));
+        let _ = context
+            .client_sender
+            .send(ClientOperation::QueryDownloadByToken(token, tx));
         let Some(download) = rx.await.ok().flatten() else {
             debug!(
                 "[listener:{peer_ip}:{peer_port}] No download found for PierceFireWall token: {}",
@@ -210,7 +216,9 @@ async fn handle_incoming_connection(stream: TcpStream, context: ConnectionContex
 
             // Query the worker for the download
             let (tx, rx) = oneshot::channel();
-            let _ = context.client_sender.send(ClientOperation::QueryDownloadByToken(download_token, tx));
+            let _ = context
+                .client_sender
+                .send(ClientOperation::QueryDownloadByToken(download_token, tx));
             let Some(download) = rx.await.ok().flatten() else {
                 error!(
                     "[listener:{}:{}] No download found for file connection token: {}",

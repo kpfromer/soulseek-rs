@@ -1,5 +1,7 @@
 use crate::Error;
-use governor::{Quota, RateLimiter, clock::DefaultClock, state::InMemoryState, state::direct::NotKeyed};
+use governor::{
+    Quota, RateLimiter, clock::DefaultClock, state::InMemoryState, state::direct::NotKeyed,
+};
 use reqwest::Client;
 use serde::Deserialize;
 use std::num::NonZeroU32;

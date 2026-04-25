@@ -29,9 +29,9 @@ pub(super) mod operation;
 mod settings;
 
 use connected_worker::ConnectedWorker;
-use download_manager::DownloadManager;
 pub use context::ClientContext;
 pub use download_handle::DownloadHandle;
+use download_manager::DownloadManager;
 pub use inner::{ActiveConnection, ClientInner, ClientState};
 pub use operation::ClientOperation;
 pub use settings::*;
@@ -323,7 +323,9 @@ impl Client {
 
         if let Some(ref active) = guard.active {
             // Active connection — worker handles insertion and routing.
-            let _ = active.op_tx.send(ClientOperation::RequestDownload(download.clone()));
+            let _ = active
+                .op_tx
+                .send(ClientOperation::RequestDownload(download.clone()));
         } else {
             // No active connection yet — buffer until connect().
             guard.pending_downloads.push_back(download.clone());

@@ -13,8 +13,8 @@ use crate::client::ClientOperation;
 use crate::error::SoulseekRs;
 use crate::message::server::MessageFactory;
 use crate::token::PeerTransferToken;
-use crate::{error, trace};
 use crate::types::{Download, DownloadStatus};
+use crate::{error, trace};
 
 const START_DOWNLOAD: [u8; 8] = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
 const READ_BUFFER_SIZE: usize = 8192;
@@ -67,14 +67,26 @@ pub fn spawn_direct_download(
     op_tx: UnboundedSender<ClientOperation>,
 ) {
     let token = download.token;
-    let peer = DownloadPeer::new(download.username.clone(), host.clone(), port, peer_token, own_username);
+    let peer = DownloadPeer::new(
+        download.username.clone(),
+        host.clone(),
+        port,
+        peer_token,
+        own_username,
+    );
     tokio::task::spawn_blocking(move || {
         let result = peer
             .download_direct(download, stream)
             .map(|(_, path)| path)
             .map_err(|e| {
-                if !matches!(e, DownloadError::Cancelled | DownloadError::NoProgressTimeout) {
-                    error!("Failed to download from {}:{} (token: {}): {}", host, port, token, e);
+                if !matches!(
+                    e,
+                    DownloadError::Cancelled | DownloadError::NoProgressTimeout
+                ) {
+                    error!(
+                        "Failed to download from {}:{} (token: {}): {}",
+                        host, port, token, e
+                    );
                 }
                 SoulseekRs::from(e)
             });
@@ -232,10 +244,14 @@ impl DownloadPeer {
 
         let mut stream = match stream {
             Some(s) => {
-                s.set_nonblocking(false).map_err(DownloadError::ConnectionFailed)?;
-                s.set_read_timeout(Some(READ_CHECK_INTERVAL)).map_err(DownloadError::ConnectionFailed)?;
-                s.set_write_timeout(Some(Duration::from_secs(5))).map_err(DownloadError::ConnectionFailed)?;
-                s.set_nodelay(true).map_err(DownloadError::ConnectionFailed)?;
+                s.set_nonblocking(false)
+                    .map_err(DownloadError::ConnectionFailed)?;
+                s.set_read_timeout(Some(READ_CHECK_INTERVAL))
+                    .map_err(DownloadError::ConnectionFailed)?;
+                s.set_write_timeout(Some(Duration::from_secs(5)))
+                    .map_err(DownloadError::ConnectionFailed)?;
+                s.set_nodelay(true)
+                    .map_err(DownloadError::ConnectionFailed)?;
                 s
             }
             None => self.establish_connection()?,
@@ -250,12 +266,7 @@ impl DownloadPeer {
 
         trace!("[download_peer:{}] sent START_DOWNLOAD", self.username);
 
-        let _total_bytes = Self::read_stream(
-            &self.username,
-            &mut stream,
-            &mut writer,
-            &download,
-        )?;
+        let _total_bytes = Self::read_stream(&self.username, &mut stream, &mut writer, &download)?;
 
         writer.flush().map_err(DownloadError::FileWriteError)?;
 
@@ -289,10 +300,14 @@ impl DownloadPeer {
 
         let mut stream = match stream {
             Some(s) => {
-                s.set_nonblocking(false).map_err(|e| (None, DownloadError::ConnectionFailed(e)))?;
-                s.set_read_timeout(Some(READ_CHECK_INTERVAL)).map_err(|e| (None, DownloadError::ConnectionFailed(e)))?;
-                s.set_write_timeout(Some(Duration::from_secs(5))).map_err(|e| (None, DownloadError::ConnectionFailed(e)))?;
-                s.set_nodelay(true).map_err(|e| (None, DownloadError::ConnectionFailed(e)))?;
+                s.set_nonblocking(false)
+                    .map_err(|e| (None, DownloadError::ConnectionFailed(e)))?;
+                s.set_read_timeout(Some(READ_CHECK_INTERVAL))
+                    .map_err(|e| (None, DownloadError::ConnectionFailed(e)))?;
+                s.set_write_timeout(Some(Duration::from_secs(5)))
+                    .map_err(|e| (None, DownloadError::ConnectionFailed(e)))?;
+                s.set_nodelay(true)
+                    .map_err(|e| (None, DownloadError::ConnectionFailed(e)))?;
                 s
             }
             None => self.establish_connection().map_err(|e| (None, e))?,
@@ -303,7 +318,9 @@ impl DownloadPeer {
         stream
             .write_all(&message.get_buffer())
             .map_err(|e| (None, DownloadError::HandshakeFailed(e)))?;
-        stream.flush().map_err(|e| (None, DownloadError::HandshakeFailed(e)))?;
+        stream
+            .flush()
+            .map_err(|e| (None, DownloadError::HandshakeFailed(e)))?;
 
         trace!(
             "[download_peer:{}] sent pierce firewall token: {}",
@@ -332,17 +349,15 @@ impl DownloadPeer {
         );
 
         // Token is now known — all subsequent errors carry Some(token).
-        let download = resolve_download(token)
-            .ok_or((Some(token), DownloadError::TokenNotFound(token)))?;
+        let download =
+            resolve_download(token).ok_or((Some(token), DownloadError::TokenNotFound(token)))?;
 
         stream
             .write_all(&START_DOWNLOAD)
             .map_err(|e| (Some(token), DownloadError::StreamWriteError(e)))?;
 
-        let path =
-            Self::resolve_download_path(&download).map_err(|e| (Some(token), e))?;
-        let mut writer =
-            Self::open_output_file(&path).map_err(|e| (Some(token), e))?;
+        let path = Self::resolve_download_path(&download).map_err(|e| (Some(token), e))?;
+        let mut writer = Self::open_output_file(&path).map_err(|e| (Some(token), e))?;
 
         // Any bytes after the 4-byte token in the first chunk are the start of file data.
         let mut total_bytes: usize = 0;
@@ -378,7 +393,9 @@ impl DownloadPeer {
 
         trace!(
             "[download_peer:{}] download_pierced complete: {} bytes → {}",
-            self.username, total_bytes + _final_bytes, path
+            self.username,
+            total_bytes + _final_bytes,
+            path
         );
 
         Ok((download, path))
@@ -451,12 +468,16 @@ impl DownloadPeer {
                         break;
                     }
                 }
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock
-                    || e.kind() == io::ErrorKind::TimedOut =>
+                Err(e)
+                    if e.kind() == io::ErrorKind::WouldBlock
+                        || e.kind() == io::ErrorKind::TimedOut =>
                 {
                     // The 1-second read timeout fired; check flags before retrying.
                     if download.cancel.load(Ordering::Relaxed) {
-                        trace!("[download_peer:{}] cancelled by caller (stalled)", _username);
+                        trace!(
+                            "[download_peer:{}] cancelled by caller (stalled)",
+                            _username
+                        );
                         return Err(DownloadError::Cancelled);
                     }
                     if let Some(timeout) = download.progress_timeout

@@ -87,11 +87,7 @@ fn strip_track_number(s: &str) -> &str {
 
     // Skip optional separator(s): spaces, dashes, dots.
     let rest = s[digit_end..].trim_start_matches(['-', '.', ' ']);
-    if !rest.is_empty() {
-        rest
-    } else {
-        s
-    }
+    if !rest.is_empty() { rest } else { s }
 }
 
 /// Try to parse `"Artist - Title"` from a filename stem.

@@ -10,10 +10,7 @@ pub struct MessageDispatcher<Op> {
 
 impl<Op> MessageDispatcher<Op> {
     pub fn new(sender: UnboundedSender<Op>, handlers: Handlers<Op>) -> Self {
-        MessageDispatcher {
-            sender,
-            handlers,
-        }
+        MessageDispatcher { sender, handlers }
     }
 
     pub fn dispatch(&self, message: &mut Message) {
