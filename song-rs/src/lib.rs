@@ -57,13 +57,15 @@ impl Client {
     /// Initiate a download for a specific result.
     ///
     /// Pass `progress_timeout` to automatically cancel the download if no progress
-    /// is received within that duration.
+    /// is received within that duration. Pass `recv_timeout` to override the per-call
+    /// timeout on [`DownloadHandle::recv`] (default: 3 minutes).
     pub async fn download(
         &self,
         result: &SongResult,
         // TODO: use a path instead of a string
         download_dir: impl Into<String>,
         progress_timeout: Option<Duration>,
+        recv_timeout: Option<Duration>,
     ) -> Result<(Download, DownloadHandle), Error> {
         info!(
             "download: filename={}, username={}",
@@ -79,7 +81,7 @@ impl Client {
             // TODO: use a path instead of a string
             download_dir.into(),
             progress_timeout,
-            None,
+            recv_timeout,
         )?;
         Ok((dl, handle))
     }
@@ -87,7 +89,8 @@ impl Client {
     /// Search and immediately download the best matching result.
     ///
     /// Pass `progress_timeout` to automatically cancel if no progress is received
-    /// within that duration.
+    /// within that duration. Pass `recv_timeout` to override the per-call timeout
+    /// on [`DownloadHandle::recv`] (default: 3 minutes).
     pub async fn download_best(
         &self,
         query: &SongQuery,
@@ -96,6 +99,7 @@ impl Client {
         download_dir: impl Into<String>,
         wanted_file_types: &WantedFileTypes,
         progress_timeout: Option<Duration>,
+        recv_timeout: Option<Duration>,
     ) -> Result<(SongResult, Download, DownloadHandle), Error> {
         self.connect().await?;
 
@@ -106,7 +110,9 @@ impl Client {
             best.filename.as_str(),
             best.score
         );
-        let (dl, handle) = self.download(&best, download_dir, progress_timeout).await?;
+        let (dl, handle) = self
+            .download(&best, download_dir, progress_timeout, recv_timeout)
+            .await?;
         Ok((best, dl, handle))
     }
 }

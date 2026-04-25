@@ -152,6 +152,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 args.download_dir.to_string_lossy().to_string(),
                 &WantedFileTypes::from(args.file_type),
                 Some(Duration::from_secs(10)),
+                None,
             )
             .await?;
 
@@ -233,6 +234,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .download(
             result,
             args.download_dir.to_string_lossy().to_string(),
+            None,
             None,
         )
         .await?;
