@@ -1,5 +1,5 @@
-mod acoustid;
-mod chromaprint;
+pub mod acoustid;
+pub mod chromaprint;
 mod error;
 mod file_hash;
 mod musicbrainz;
