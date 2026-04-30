@@ -30,11 +30,27 @@ mod settings;
 
 use connected_worker::ConnectedWorker;
 pub use context::ClientContext;
-pub use download_handle::DownloadHandle;
+pub use download_handle::{DownloadHandle, RecvOutcome};
 use download_manager::DownloadManager;
 pub use inner::{ActiveConnection, ClientInner, ClientState};
 pub use operation::ClientOperation;
 pub use settings::*;
+
+/// Per-download tunable timeouts. Each is `None` to keep the SDK default.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct DownloadOptions {
+    /// Cancel the download if no progress *event* (every ~120KB chunk) has
+    /// been emitted within this window. Detects glacial transfers that
+    /// trickle bytes without ever reaching the next progress chunk.
+    pub progress_timeout: Option<Duration>,
+    /// Hard wall on `DownloadHandle::recv` — if no status update arrives in
+    /// this window, the handle returns `Cancelled` (or `Timeout` from
+    /// `recv_typed`). Defaults to 3 minutes inside `DownloadHandle`.
+    pub recv_timeout: Option<Duration>,
+    /// Override for the hard stall cap (default 30s). When no bytes arrive
+    /// within this window, the download is aborted with a timeout error.
+    pub stall_timeout: Option<Duration>,
+}
 
 #[derive(Clone)]
 pub struct Client {
@@ -286,6 +302,29 @@ impl Client {
         progress_timeout: Option<Duration>,
         recv_timeout: Option<Duration>,
     ) -> Result<(Download, DownloadHandle)> {
+        self.download_with_options(
+            filename,
+            username,
+            size,
+            download_directory,
+            DownloadOptions {
+                progress_timeout,
+                recv_timeout,
+                stall_timeout: None,
+            },
+        )
+    }
+
+    /// Same as [`Self::download`] but accepts the full
+    /// [`DownloadOptions`] struct including `stall_timeout`.
+    pub fn download_with_options(
+        &self,
+        filename: impl Into<SoulseekPath>,
+        username: String,
+        size: u64,
+        download_directory: String,
+        options: DownloadOptions,
+    ) -> Result<(Download, DownloadHandle)> {
         let filename: SoulseekPath = filename.into();
         info!("[client] Downloading {} from {}", filename, username);
 
@@ -294,6 +333,12 @@ impl Client {
 
         let (download_sender, download_receiver) = mpsc::unbounded_channel::<DownloadStatus>();
         let cancel = Arc::new(AtomicBool::new(false));
+
+        let DownloadOptions {
+            progress_timeout,
+            recv_timeout,
+            stall_timeout,
+        } = options;
 
         let download = Download {
             username: username.clone(),
@@ -306,6 +351,7 @@ impl Client {
             sender: download_sender,
             cancel: cancel.clone(),
             progress_timeout,
+            stall_timeout,
             queue_timeout_handle: None,
         };
 

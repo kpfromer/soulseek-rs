@@ -12,6 +12,21 @@ use crate::types::DownloadStatus;
 
 const DEFAULT_RECV_TIMEOUT: Duration = Duration::from_secs(180);
 
+/// Outcome of [`DownloadHandle::recv_typed`]: distinguishes a peer/channel
+/// state from a caller-side `recv_timeout` firing. The legacy
+/// [`DownloadHandle::recv`] collapses `Timeout` and peer-cancel into one
+/// `Some(DownloadStatus::Cancelled)`.
+#[derive(Debug, Clone)]
+pub enum RecvOutcome {
+    /// A status update arrived from the download task.
+    Status(DownloadStatus),
+    /// The channel closed (download task exited without sending).
+    Closed,
+    /// `recv_timeout` fired before any status update arrived. The handle
+    /// has already signalled cancel internally.
+    Timeout,
+}
+
 /// Handle returned by [`Client::download`] for receiving progress and cancelling a download.
 ///
 /// Dropping this handle automatically cancels the download.
@@ -55,17 +70,33 @@ impl DownloadHandle {
 
     /// Receive the next status update, or `None` if the channel is closed.
     ///
-    /// Times out after `recv_timeout` (default 10 minutes) and returns
-    /// `Some(DownloadStatus::Cancelled)` if no update arrives in time.
+    /// Times out after `recv_timeout` (default 3 minutes) and returns
+    /// `Some(DownloadStatus::Cancelled)` if no update arrives in time. This
+    /// makes the timeout case indistinguishable from a peer-side cancel —
+    /// callers that need to tell them apart should use [`Self::recv_typed`].
     pub async fn recv(&mut self) -> Option<DownloadStatus> {
+        match self.recv_typed().await {
+            RecvOutcome::Status(s) => Some(s),
+            RecvOutcome::Closed => None,
+            RecvOutcome::Timeout => Some(DownloadStatus::Cancelled),
+        }
+    }
+
+    /// Like [`Self::recv`] but distinguishes a `recv_timeout`-fired cancel
+    /// from peer-driven `Cancelled` and from channel close. Callers that
+    /// branch on cause (e.g. for retry policies) should prefer this.
+    pub async fn recv_typed(&mut self) -> RecvOutcome {
         let recv_timeout = self.recv_timeout.unwrap_or(DEFAULT_RECV_TIMEOUT);
         tokio::select! {
             result = self.receiver.recv() => {
-                result
+                match result {
+                    Some(s) => RecvOutcome::Status(s),
+                    None => RecvOutcome::Closed,
+                }
             }
             _ = sleep(recv_timeout) => {
                 self.cancel();
-                Some(DownloadStatus::Cancelled)
+                RecvOutcome::Timeout
             }
         }
     }

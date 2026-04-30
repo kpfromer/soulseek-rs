@@ -1,0 +1,9 @@
+[package]
+name = "mm-text-match"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Text normalization, edit-distance similarity, and duration-falloff helpers shared by song-rs (soulseek search ranking) and music-manager v2 (matching UI)."
+
+[dependencies]
+unicode-normalization = "0.1.25"

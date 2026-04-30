@@ -21,8 +21,9 @@ const READ_BUFFER_SIZE: usize = 8192;
 const PROGRESS_UPDATE_CHUNKS: usize = 15; // ~120KB (15 * 8192 bytes)
 /// How often the read loop wakes up to check cancel/timeout flags when the peer is silent.
 const READ_CHECK_INTERVAL: Duration = Duration::from_secs(1);
-/// Hard stall timeout: give up if no bytes arrive within this window.
-const STALL_TIMEOUT: Duration = Duration::from_secs(30);
+/// Default hard stall timeout: give up if no bytes arrive within this window.
+/// Callers can override per-download via `Download::stall_timeout`.
+const DEFAULT_STALL_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug)]
 pub enum DownloadError {
@@ -489,7 +490,8 @@ impl DownloadPeer {
                         );
                         return Err(DownloadError::NoProgressTimeout);
                     }
-                    if last_data_time.elapsed() >= STALL_TIMEOUT {
+                    let stall = download.stall_timeout.unwrap_or(DEFAULT_STALL_TIMEOUT);
+                    if last_data_time.elapsed() >= stall {
                         return Err(DownloadError::StreamReadError(io::Error::new(
                             io::ErrorKind::TimedOut,
                             "peer stopped sending data",
