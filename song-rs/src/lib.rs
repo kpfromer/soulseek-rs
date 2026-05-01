@@ -10,6 +10,7 @@ pub use error::Error;
 pub use types::{FileType, SongQuery, SongResult, WantedFileTypes};
 
 pub use soulseek_rs::DownloadHandle;
+pub use soulseek_rs::SoulseekPath;
 pub use soulseek_rs::types::{Download, DownloadStatus};
 use std::time::Duration;
 

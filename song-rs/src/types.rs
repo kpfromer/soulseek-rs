@@ -2,12 +2,17 @@ use std::{collections::HashSet, fmt};
 
 use soulseek_rs::SoulseekPath;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct SongQuery {
     pub title: String,
     pub artist: String,
     pub album: Option<String>,
-    pub duration_secs: u32,
+    /// Target duration. `None` skips the duration term in the ranker (the
+    /// score falls back to a neutral 0.5).
+    pub duration_secs: Option<u32>,
+    /// Filter results below this bitrate (kbps). `None` (default) accepts
+    /// any bitrate. Lossless files (FLAC/ALAC/WAV/AIFF) are always kept.
+    pub min_bitrate_kbps: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -80,6 +85,11 @@ impl fmt::Display for FileType {
 pub enum WantedFileTypes {
     All,
     Specific(HashSet<FileType>),
+    /// Ordered priority list. Earlier entries score higher in the ranker
+    /// (smooth nudge, not a hard sort) so callers' format preference is
+    /// honoured without a second post-pass. `is_compatible` accepts any
+    /// type in the list; a type not in the list is rejected.
+    Ordered(Vec<FileType>),
 }
 
 impl WantedFileTypes {
@@ -106,11 +116,25 @@ impl WantedFileTypes {
     pub fn specific(file_types: HashSet<FileType>) -> Self {
         Self::Specific(file_types)
     }
+    pub fn ordered(file_types: Vec<FileType>) -> Self {
+        Self::Ordered(file_types)
+    }
 
     pub(crate) fn is_compatible(&self, file_type: &FileType) -> bool {
         match self {
             Self::All => true,
             Self::Specific(file_types) => file_types.contains(file_type),
+            Self::Ordered(file_types) => file_types.contains(file_type),
+        }
+    }
+
+    /// Position of `file_type` in an `Ordered` list (0 = highest priority),
+    /// or `None` for `All` / `Specific` / not-in-list. The ranker uses this
+    /// for a small score nudge so user-specified format priority breaks ties.
+    pub(crate) fn priority_index(&self, file_type: &FileType) -> Option<usize> {
+        match self {
+            Self::Ordered(types) => types.iter().position(|t| t == file_type),
+            _ => None,
         }
     }
 }

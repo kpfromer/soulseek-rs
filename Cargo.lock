@@ -1298,6 +1298,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "mm-text-match"
+version = "0.1.0"
+dependencies = [
+ "unicode-normalization",
+]
+
+[[package]]
 name = "moxcms"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2041,12 +2048,12 @@ name = "song-rs"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "mm-text-match",
  "soulseek-rs-lib",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
  "tracing-subscriber",
- "unicode-normalization",
 ]
 
 [[package]]

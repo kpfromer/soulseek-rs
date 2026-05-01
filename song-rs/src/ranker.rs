@@ -1,5 +1,4 @@
-use unicode_normalization::UnicodeNormalization;
-
+use mm_text_match::{duration_score, normalize_str, similarity};
 use soulseek_rs::types::File;
 
 use crate::parser::parse_soulseek_filename;
@@ -26,6 +25,18 @@ pub(crate) fn rank_results(
                 return None;
             }
 
+            // Min-bitrate filter. Lossless formats are always kept (their
+            // "bitrate" value is meaningless / variable).
+            if let Some(min) = query.min_bitrate_kbps
+                && !file_type.is_lossless()
+                && !file
+                    .attributes
+                    .bitrate
+                    .is_some_and(|br| br >= min)
+            {
+                return None;
+            }
+
             // Parse metadata from path.
             let parsed = parse_soulseek_filename(file.name.as_str());
 
@@ -36,6 +47,7 @@ pub(crate) fn rank_results(
                 &file.attributes,
                 &file_type,
                 file.name.as_str(),
+                wanted_file_types,
             );
 
             if score >= MIN_SCORE_THRESHOLD {
@@ -76,6 +88,7 @@ fn compare_tracks(
     attrs: &soulseek_rs::types::FileAttributes,
     file_type: &FileType,
     path_for_trace: &str,
+    wanted: &WantedFileTypes,
 ) -> f64 {
     let norm_query_title = normalize_str(&query.title);
     let norm_parsed_title = normalize_str(&parsed.title);
@@ -89,28 +102,22 @@ fn compare_tracks(
         similarity(&norm_query_artist, &norm_parsed_artist)
     };
 
-    let duration_score = match attrs.duration {
-        Some(f) => {
-            let diff = (query.duration_secs as i64 - f as i64).unsigned_abs() as u32;
-            if diff <= 5 {
-                1.0
-            } else if diff >= 30 {
-                0.0
-            } else {
-                // Linear falloff from 1.0 at 5s to 0.0 at 30s.
-                1.0 - (diff - 5) as f64 / 25.0
-            }
-        }
+    let dur_score = match (attrs.duration, query.duration_secs) {
+        (Some(f), Some(target)) => duration_score(f, target, 5, 30),
         _ => 0.5,
     };
 
     let format_score = score_format_quality(file_type, attrs.bitrate);
+    let priority_nudge = wanted
+        .priority_index(file_type)
+        .map(|i| 1.0 - (i as f64 * 0.05).min(0.4))
+        .unwrap_or(1.0);
 
-    let score =
-        title_score * 0.45 + artist_score * 0.30 + duration_score * 0.10 + format_score * 0.15;
+    let raw = title_score * 0.45 + artist_score * 0.30 + dur_score * 0.10 + format_score * 0.15;
+    let score = raw * priority_nudge;
     trace!(
         path = path_for_trace,
-        title_score, artist_score, duration_score, format_score, score, "compare_tracks"
+        title_score, artist_score, dur_score, format_score, priority_nudge, score, "compare_tracks"
     );
     score
 }
@@ -127,93 +134,9 @@ fn score_format_quality(file_type: &FileType, bitrate: Option<u32>) -> f64 {
     }
 }
 
-fn normalize_str(s: &str) -> String {
-    // NFC normalize, lowercase, trim.
-    let normalized: String = s.nfc().collect();
-    let lower = normalized.to_lowercase();
-    let trimmed = lower.trim();
-
-    // Strip parenthetical and bracketed content: "(feat. X)", "[Deluxe Edition]", etc.
-    let mut result = String::with_capacity(trimmed.len());
-    let mut depth = 0usize;
-    let mut close = ' ';
-    for c in trimmed.chars() {
-        match c {
-            '(' | '[' if depth == 0 => {
-                depth = 1;
-                close = if c == '(' { ')' } else { ']' };
-            }
-            c if depth > 0 && c == close => {
-                depth = 0;
-            }
-            _ if depth > 0 => {}
-            c => result.push(c),
-        }
-    }
-
-    // Collapse whitespace.
-    result.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-fn similarity(a: &str, b: &str) -> f64 {
-    if a == b {
-        return 1.0;
-    }
-    let max_len = a.len().max(b.len());
-    if max_len == 0 {
-        return 1.0;
-    }
-    let dist = levenshtein(a, b);
-    1.0 - dist as f64 / max_len as f64
-}
-
-fn levenshtein(a: &str, b: &str) -> usize {
-    let a: Vec<char> = a.chars().collect();
-    let b: Vec<char> = b.chars().collect();
-    let m = a.len();
-    let n = b.len();
-
-    let mut dp = vec![0usize; n + 1];
-    for (j, cell) in dp.iter_mut().enumerate() {
-        *cell = j;
-    }
-
-    for i in 1..=m {
-        let mut prev = dp[0];
-        dp[0] = i;
-        for j in 1..=n {
-            let old = dp[j];
-            dp[j] = if a[i - 1] == b[j - 1] {
-                prev
-            } else {
-                1 + prev.min(dp[j]).min(dp[j - 1])
-            };
-            prev = old;
-        }
-    }
-
-    dp[n]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_similarity_identical() {
-        assert!((similarity("hello", "hello") - 1.0).abs() < 1e-10);
-    }
-
-    #[test]
-    fn test_similarity_empty() {
-        assert!((similarity("", "") - 1.0).abs() < 1e-10);
-    }
-
-    #[test]
-    fn test_normalize_strips_parens() {
-        assert_eq!(normalize_str("Song (feat. Artist)"), "song");
-        assert_eq!(normalize_str("Album [Deluxe Edition]"), "album");
-    }
 
     #[test]
     fn test_score_format_lossless() {

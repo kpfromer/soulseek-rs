@@ -136,7 +136,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         title,
         artist,
         album: Some(album),
-        duration_secs: duration.duration.as_secs() as u32,
+        duration_secs: Some(duration.duration.as_secs() as u32),
+        min_bitrate_kbps: None,
     };
 
     // --- Search ---

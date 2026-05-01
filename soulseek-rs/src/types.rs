@@ -151,8 +151,16 @@ pub struct Download {
     /// [`DownloadHandle::cancel`]: crate::client::download_handle::DownloadHandle::cancel
     pub cancel: Arc<AtomicBool>,
     /// If set, the download is cancelled when no progress update arrives within
-    /// this duration. Used to detect stalled transfers.
+    /// this duration. Measures from the *last emitted progress event* (every
+    /// ~120KB), so it fires when bytes trickle in slowly enough to never reach
+    /// the next progress chunk in `progress_timeout`. Distinct from
+    /// `stall_timeout`, which measures since the last byte arrived.
     pub progress_timeout: Option<Duration>,
+    /// Override for the hard stall cap (default 30s). When set, the download
+    /// is aborted if no bytes at all are received in this window. Almost no
+    /// callers should change this — it exists so test harnesses and slow-link
+    /// callers can lengthen the default.
+    pub stall_timeout: Option<Duration>,
     /// Abort handle for the queue-response timeout task.
     /// Aborted when the download transitions out of `QueuedLocally`
     /// (i.e. when `TransferRequest` or a queue-position update is received).
